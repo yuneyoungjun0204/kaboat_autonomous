@@ -29,6 +29,8 @@ setup(
             'gps_navigator = kaboat_autonomous.controllers.gps_navigator:main',
             'motor_controller = kaboat_autonomous.controllers.motor_controller:main',
             'mission_runner = kaboat_autonomous.mission_runner:main',
+            'visualize_local = kaboat_autonomous.visualize_local:main',
+            'visualize_global = kaboat_autonomous.visualize_global:main',
         ],
     },
 )
