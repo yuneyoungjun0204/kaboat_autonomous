@@ -38,6 +38,11 @@ tau_x = 0.0
 threshold = 50.0
 visual_size = 30
 
+# 기준점 (첫 GPS 시 자동 설정)
+ref_utm_x = None
+ref_utm_y = None
+ref_initialized = False
+
 
 def quaternion_to_yaw(q: Quaternion) -> float:
     siny_cosp = 2 * (q.w * q.z + q.x * q.y)
@@ -96,11 +101,19 @@ class GlobalMapVisualizer(Node):
         distances = ranges
 
     def gps_callback(self, msg):
-        global gps_position
+        global gps_position, ref_utm_x, ref_utm_y, ref_initialized
         if msg.latitude != 0 and msg.longitude != 0:
             utm_x, utm_y, _ = SETTINGS.latlon_to_utm(msg.latitude, msg.longitude)
-            gps_position[0] = utm_x - SETTINGS.REF_UTM_X
-            gps_position[1] = utm_y - SETTINGS.REF_UTM_Y
+
+            # 첫 GPS 수신 시 현재 위치를 기준점으로 설정
+            if not ref_initialized:
+                ref_utm_x = utm_x
+                ref_utm_y = utm_y
+                ref_initialized = True
+                self.get_logger().info(f'Viz ref point: ({utm_x:.2f}, {utm_y:.2f})')
+
+            gps_position[0] = utm_x - ref_utm_x
+            gps_position[1] = utm_y - ref_utm_y
 
     def imu_callback(self, msg):
         global heading_angle

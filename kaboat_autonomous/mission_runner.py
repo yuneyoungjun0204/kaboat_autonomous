@@ -48,6 +48,11 @@ class MissionRunner(Node):
         # 보트 상태
         self.boat = Boat()
 
+        # 기준점 (첫 GPS 수신 시 자동 설정)
+        self.ref_utm_x = None
+        self.ref_utm_y = None
+        self.ref_initialized = False
+
         # 미션 상태
         self.waypoints: List[tuple] = []
         self.current_waypoint_idx = 0
@@ -88,9 +93,19 @@ class MissionRunner(Node):
         """GPS 데이터 수신"""
         if msg.latitude != 0 and msg.longitude != 0:
             utm_x, utm_y, _ = SETTINGS.latlon_to_utm(msg.latitude, msg.longitude)
+
+            # 첫 GPS 수신 시 현재 위치를 기준점으로 설정
+            if not self.ref_initialized:
+                self.ref_utm_x = utm_x
+                self.ref_utm_y = utm_y
+                self.ref_initialized = True
+                self.get_logger().info(
+                    f'Reference point set: UTM ({utm_x:.2f}, {utm_y:.2f})'
+                )
+
             # 기준점 기준 상대 좌표
-            self.boat.position[0] = utm_x - SETTINGS.REF_UTM_X
-            self.boat.position[1] = utm_y - SETTINGS.REF_UTM_Y
+            self.boat.position[0] = utm_x - self.ref_utm_x
+            self.boat.position[1] = utm_y - self.ref_utm_y
 
     def imu_callback(self, msg: Imu):
         """IMU 데이터 수신"""
