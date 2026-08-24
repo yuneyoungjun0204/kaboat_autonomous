@@ -14,17 +14,15 @@ def generate_launch_description():
     # GZ_IP 환경변수 설정 (Tailscale 충돌 방지)
     set_gz_ip = SetEnvironmentVariable('GZ_IP', '10.22.79.185')
 
-    # 센서 브릿지 (Gazebo Garden 용)
-    bridge_params = [
+    # 센서 브릿지 (GZ → ROS)
+    sensor_params = [
         '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
         '/world/kaboat_course/model/wamv/link/wamv/gps_wamv_link/sensor/navsat/navsat@sensor_msgs/msg/NavSatFix[gz.msgs.NavSat',
         '/world/kaboat_course/model/wamv/link/wamv/imu_wamv_link/sensor/imu_wamv_sensor/imu@sensor_msgs/msg/Imu[gz.msgs.IMU',
         '/world/kaboat_course/model/wamv/link/wamv/base_link/sensor/lidar_wamv_sensor/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
-        '/wamv/thrusters/left/thrust@std_msgs/msg/Float64]gz.msgs.Double',
-        '/wamv/thrusters/right/thrust@std_msgs/msg/Float64]gz.msgs.Double',
     ]
 
-    remappings = [
+    sensor_remappings = [
         ('/world/kaboat_course/model/wamv/link/wamv/gps_wamv_link/sensor/navsat/navsat', '/wamv/sensors/gps/fix'),
         ('/world/kaboat_course/model/wamv/link/wamv/imu_wamv_link/sensor/imu_wamv_sensor/imu', '/wamv/sensors/imu/data'),
         ('/world/kaboat_course/model/wamv/link/wamv/base_link/sensor/lidar_wamv_sensor/scan', '/wamv/sensors/lidar/scan'),
@@ -33,8 +31,23 @@ def generate_launch_description():
     sensor_bridge = Node(
         package='ros_gz_bridge',
         executable='parameter_bridge',
-        arguments=bridge_params,
-        remappings=remappings,
+        name='sensor_bridge',
+        arguments=sensor_params,
+        remappings=sensor_remappings,
+        output='screen'
+    )
+
+    # 스러스터 브릿지 (ROS → GZ) - 별도 노드
+    thruster_params = [
+        '/wamv/thrusters/left/thrust@std_msgs/msg/Float64]gz.msgs.Double',
+        '/wamv/thrusters/right/thrust@std_msgs/msg/Float64]gz.msgs.Double',
+    ]
+
+    thruster_bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        name='thruster_bridge',
+        arguments=thruster_params,
         output='screen'
     )
 
@@ -57,6 +70,7 @@ def generate_launch_description():
     return LaunchDescription([
         set_gz_ip,
         sensor_bridge,
+        thruster_bridge,
         motor_controller,
         mission_runner,
     ])
