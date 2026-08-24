@@ -1,0 +1,260 @@
+"""
+자율주행 경로계획 모듈
+SeaNU_KABOAT2024 AutonomousModule.py 포팅 (ROS2)
+- Cost 함수 기반 장애물 회피
+- 웨이포인트 추종
+"""
+import numpy as np
+from math import ceil, floor, exp
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 설정 import
+try:
+    from config import settings as SETTINGS
+except ImportError:
+    import sys
+    sys.path.append('/home/yune/vrx_ws/src/kaboat_autonomous')
+    from config import settings as SETTINGS
+
+
+@dataclass
+class Boat:
+    """보트 상태"""
+    position: List[float] = None  # [x, y] UTM 좌표
+    psi: float = 0.0              # 헤딩 (도)
+    scan: List[float] = None      # LiDAR 스캔 데이터 (360도)
+
+    def __post_init__(self):
+        if self.position is None:
+            self.position = [0.0, 0.0]
+        if self.scan is None:
+            self.scan = [0.0] * 360
+
+
+def normalize_angle(angle: float) -> float:
+    """각도를 -180 ~ 180 범위로 정규화"""
+    return (angle + 180) % 360 - 180
+
+
+def cost_func_angle(x: float) -> float:
+    """각도에 대한 Cost 함수 (목표 방향에서 벗어날수록 높음)"""
+    return 1 - exp(-(x / 100) ** 2)
+
+
+def cost_func_distance(x: float) -> float:
+    """거리에 대한 Cost 함수 (장애물에 가까울수록 높음)"""
+    return exp(-(x / 3) ** 2)
+
+
+def calculate_safe_zone(ld: List[float]) -> List[float]:
+    """
+    LiDAR 데이터를 바탕으로 안전 구역 계산
+
+    Args:
+        ld: 360도 LiDAR 거리 데이터
+
+    Returns:
+        safe_zone: 각 방향별 안전 거리
+    """
+    safe_zone = [SETTINGS.AVOID_RANGE] * 360
+
+    for i in range(-180, 181):
+        idx = i % 360
+        if 0 < ld[idx] < SETTINGS.AVOID_RANGE:
+            safe_zone[idx] = 0
+
+    temp = np.array(safe_zone)
+    for i in range(-180, 180):
+        idx = i % 360
+        idx_next = (i + 1) % 360
+
+        if safe_zone[idx] > safe_zone[idx_next]:
+            theta = np.arctan2(SETTINGS.BOAT_WIDTH / 2, ld[idx_next]) * 180 / np.pi
+            for j in range(floor(i + 1 - theta), i + 1):
+                temp[j % 360] = 0
+
+        if safe_zone[idx] < safe_zone[idx_next]:
+            theta = np.arctan2(SETTINGS.BOAT_WIDTH / 2, ld[idx]) * 180 / np.pi
+            for j in range(i, ceil(i + theta) + 1):
+                temp[j % 360] = 0
+
+    return temp.tolist()
+
+
+def calculate_optimal_psi_d(ld: List[float], safe_ld: List[float], goal_psi: int) -> int:
+    """
+    Cost 함수를 적용하여 최적 조향 각도 계산
+
+    Args:
+        ld: LiDAR 데이터
+        safe_ld: 안전 구역 데이터
+        goal_psi: 목표 방향 각도
+
+    Returns:
+        최적 조향 각도
+    """
+    theta_list = [[0, 10000]]
+
+    for i in range(-180, 180):
+        idx = i % 360
+        if safe_ld[idx] > 0:
+            cost = (SETTINGS.GAIN_PSI * cost_func_angle(i - goal_psi) +
+                    SETTINGS.GAIN_DISTANCE * cost_func_distance(ld[idx]))
+            theta_list.append([i, cost])
+
+    return sorted(theta_list, key=lambda x: x[1])[0][0]
+
+
+def goal_check(boat: Boat, goal_distance: float, goal_psi: float) -> bool:
+    """
+    목적지까지 경로에 장애물이 있는지 판단
+
+    Args:
+        boat: 보트 상태
+        goal_distance: 목표까지 거리
+        goal_psi: 목표 방향 각도
+
+    Returns:
+        True면 장애물 없음, False면 장애물 있음
+    """
+    l = goal_distance
+    theta = ceil(np.degrees(np.arctan2(SETTINGS.BOAT_WIDTH / 2, l)))
+    is_able = True
+
+    for i in range(0, 90 - theta):
+        angle = int(normalize_angle(int(goal_psi) - 90 + i)) % 360
+        r = SETTINGS.BOAT_WIDTH / (2 * np.cos(np.radians(i)))
+        if boat.scan[angle] == 0:
+            continue
+        if r > boat.scan[angle]:
+            is_able = False
+
+    for i in range(-theta, theta + 1):
+        angle = int(normalize_angle(int(goal_psi) + i)) % 360
+        if boat.scan[angle] != 0 and boat.scan[angle] < l:
+            is_able = False
+
+    for i in range(0, 90 - theta):
+        angle = int(normalize_angle(int(goal_psi) + 90 - i)) % 360
+        r = SETTINGS.BOAT_WIDTH / (2 * np.cos(np.radians(i)))
+        if boat.scan[angle] == 0:
+            continue
+        if r > boat.scan[angle]:
+            is_able = False
+
+    return is_able
+
+
+def goal_passed(boat: Boat, goal_x: float, goal_y: float,
+                goal_threshold: float = None) -> bool:
+    """
+    목적지 도착 판단
+
+    Args:
+        boat: 보트 상태
+        goal_x, goal_y: 목표 좌표 (UTM)
+        goal_threshold: 도착 판정 거리
+
+    Returns:
+        True면 도착
+    """
+    if goal_threshold is None:
+        goal_threshold = SETTINGS.GOAL_RANGE
+
+    dx = boat.position[0] - goal_x
+    dy = boat.position[1] - goal_y
+    return (dx ** 2 + dy ** 2) < goal_threshold ** 2
+
+
+def pathplan(boat: Boat, goal_x: float, goal_y: float) -> Tuple[float, float]:
+    """
+    경로 계획 메인 함수
+    LiDAR 데이터를 바탕으로 최적의 조향각과 추진력 계산
+
+    Args:
+        boat: 보트 상태
+        goal_x, goal_y: 목표 좌표 (UTM)
+
+    Returns:
+        (psi_error, tau_x): 조향 오차(도), 추진력
+    """
+    if goal_x is None or goal_y is None:
+        return (0.0, 0.0)
+
+    # 목표 방향 및 거리 계산
+    dx = goal_x - boat.position[0]
+    dy = goal_y - boat.position[1]
+
+    goal_psi = np.arctan2(dx, dy) * 180 / np.pi - boat.psi
+    goal_psi = normalize_angle(goal_psi)
+    goal_distance = np.sqrt(dx ** 2 + dy ** 2)
+
+    if len(boat.scan) == 0:
+        return (0.0, 0.0)
+
+    # 안전 구역 계산
+    safe_ld = calculate_safe_zone(boat.scan)
+    psi_error = calculate_optimal_psi_d(boat.scan, safe_ld, int(goal_psi))
+
+    # 추진력 계산
+    if goal_check(boat, goal_distance, goal_psi):
+        # 장애물 없음 - 목표 방향으로 직진
+        tau_x = 150
+        psi_error = goal_psi
+        if abs(psi_error) < 2:
+            tau_x = min((goal_distance ** 4) + 100, SETTINGS.MAX_THRUST)
+    else:
+        # 장애물 회피 모드
+        tx_dist_min = 30
+        tx_dist_max = 200
+        dist_danger = 1.5
+        dist_safe = 6
+
+        tx_angle_min = 50
+        tx_angle_max = 200
+        angle_danger = 45
+
+        dist = boat.scan[0] if boat.scan[0] > 0 else SETTINGS.LIDAR_MAX_RANGE
+
+        # 거리 기반 속도 계산
+        if dist <= dist_danger:
+            tx_dist = (tx_dist_min / dist_danger) * dist
+        elif dist <= dist_safe:
+            tx_dist = ((tx_dist_max - tx_dist_min) / (dist_safe - dist_danger)) * dist + tx_dist_min
+        else:
+            tx_dist = tx_dist_max
+
+        # 각도 기반 속도 계산
+        angle = abs(psi_error)
+        if angle <= angle_danger:
+            tx_angle = ((tx_angle_min - tx_angle_max) / angle_danger) * angle + tx_angle_max
+        else:
+            tx_angle = (tx_angle_min / (angle_danger - 180)) * (angle - 180)
+
+        if angle > angle_danger:
+            tau_x = tx_angle
+        else:
+            tau_x = tx_dist + tx_angle
+
+        tau_x = min(tau_x, SETTINGS.MAX_THRUST)
+
+    return (float(psi_error), float(tau_x))
+
+
+def rotate(boat: Boat, psi_d: float) -> Tuple[float, float]:
+    """
+    특정 방향으로 회전 (제자리)
+
+    Args:
+        boat: 보트 상태
+        psi_d: 목표 헤딩 (도)
+
+    Returns:
+        (psi_error, 0): 조향 오차, 추진력 0
+    """
+    psi_error = normalize_angle(psi_d - boat.psi)
+    return (float(psi_error), 0.0)
