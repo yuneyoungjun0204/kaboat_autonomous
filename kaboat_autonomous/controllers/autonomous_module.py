@@ -200,22 +200,22 @@ def pathplan(boat: Boat, goal_x: float, goal_y: float) -> Tuple[float, float]:
     safe_ld = calculate_safe_zone(boat.scan)
     psi_error = calculate_optimal_psi_d(boat.scan, safe_ld, int(goal_psi))
 
-    # 추진력 계산
+    # 추진력 계산 (10배 스케일)
     if goal_check(boat, goal_distance, goal_psi):
         # 장애물 없음 - 목표 방향으로 직진
-        tau_x = 150
+        tau_x = 1500
         psi_error = goal_psi
         if abs(psi_error) < 2:
-            tau_x = min((goal_distance ** 4) + 100, SETTINGS.MAX_THRUST)
+            tau_x = min((goal_distance ** 4) + 1000, SETTINGS.MAX_THRUST)
     else:
         # 장애물 회피 모드
-        tx_dist_min = 30
-        tx_dist_max = 200
+        tx_dist_min = 300
+        tx_dist_max = 2000
         dist_danger = 1.5
         dist_safe = 6
 
-        tx_angle_min = 50
-        tx_angle_max = 200
+        tx_angle_min = 500
+        tx_angle_max = 2000
         angle_danger = 45
 
         dist = boat.scan[0] if boat.scan[0] > 0 else SETTINGS.LIDAR_MAX_RANGE
