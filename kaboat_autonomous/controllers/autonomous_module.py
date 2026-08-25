@@ -54,12 +54,12 @@ HEADING_CMD_OFFSET_DEG = 0.0
 
 def cost_func_angle(x: float) -> float:
     """각도에 대한 Cost 함수 (목표 방향에서 벗어날수록 높음)"""
-    return 1 - exp(-(x / 100) ** 2)
+    return 1 - exp(-(x / 60) ** 2)
 
 
 def cost_func_distance(x: float) -> float:
     """거리에 대한 Cost 함수 (장애물에 가까울수록 높음)"""
-    return exp(-(x / 3) ** 2)
+    return exp(-(x/30))
 
 
 def calculate_safe_zone(ld: List[float]) -> List[float]:
@@ -125,6 +125,28 @@ def calculate_optimal_psi_d(ld: List[float], safe_ld: List[float], goal_psi: int
             theta_list.append([i, cost])
 
     return sorted(theta_list, key=lambda x: x[1])[0][0]
+
+
+def compute_cost_profile(ld: List[float], safe_ld: List[float], goal_psi: float):
+    """
+    calculate_optimal_psi_d와 동일한 루프/공식으로 후보 각도별
+    angle_cost, dist_cost, total_cost를 모두 기록한다 (시각화 디버그용).
+
+    Returns:
+        (angles, angle_costs, dist_costs, total_costs) - 각 리스트는 같은 길이
+    """
+    angles_deg, angle_costs, dist_costs, total_costs = [], [], [], []
+    for i in range(-180, 180):
+        idx = i % 360
+        if safe_ld[idx] > 0:
+            dist_for_cost = ld[idx] if ld[idx] > 0 else SETTINGS.LIDAR_MAX_RANGE
+            ac = SETTINGS.GAIN_PSI * cost_func_angle(i - goal_psi)
+            dc = SETTINGS.GAIN_DISTANCE * cost_func_distance(dist_for_cost)
+            angles_deg.append(i)
+            angle_costs.append(ac)
+            dist_costs.append(dc)
+            total_costs.append(ac + dc)
+    return angles_deg, angle_costs, dist_costs, total_costs
 
 
 def goal_check(boat: Boat, goal_distance: float, goal_psi: float) -> bool:
@@ -235,8 +257,8 @@ def pathplan(boat: Boat, goal_x: float, goal_y: float) -> Tuple[float, float]:
 
     # 추진력 계산 (VRX: 각속도 rad/s)
     # MAX_THRUST의 70%를 최대로 사용 (30%는 조향용 여유)
-    max_forward = SETTINGS.MAX_THRUST * 0.7  # 조향 여유 확보
-    base_thrust = max_forward * 0.75  # 기본 추력
+    max_forward = SETTINGS.MAX_THRUST * 0.8  # 조향 여유 확보
+    base_thrust = max_forward * 0.85  # 기본 추력
 
     if is_clear:
         # 장애물 없음 - 목표 방향으로 직진

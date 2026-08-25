@@ -54,17 +54,17 @@ IS_SIMULATOR = True
 
 # 자율주행 파라미터
 BOAT_WIDTH = 2.5       # WAM-V 폭 (m)
-AVOID_RANGE = 5.0      # 장애물 회피 거리 (m)
+AVOID_RANGE = 25.0      # 장애물 회피 거리 (m)
 GAIN_PSI = 1.0         # 목적지 각도 가중치
-GAIN_DISTANCE = 0.5    # 거리 가중치
+GAIN_DISTANCE = 1.5    # 거리 가중치
 GOAL_RANGE = 3.0       # 웨이포인트 도착 판정 거리 (m)
 
 # PD 제어 파라미터
 # VRX 스러스터는 velocity_control=true (각속도 rad/s 입력)
 # 1000N 추력 ≈ 12 rad/s, 2000N ≈ 17 rad/s
 # max_thrust_cmd ≈ 2354 rad/s (VRX 설정)
-KP = 50.0              # 비례 계수 (각속도 제어용)
-KD = 10.0              # 미분 계수
+KP = 100.0              # 비례 계수 (각속도 제어용)
+KD = 12.0              # 미분 계수
 MAX_THRUST = 500.0     # 최대 각속도 (rad/s) - 기본 전진 500rpm
 
 # 센서 설정

@@ -91,6 +91,14 @@ class MissionRunner(Node):
             10
         )
 
+        # 시각화 트랙바에서 실시간 파라미터 조정 수신
+        self.create_subscription(
+            Float32MultiArray,
+            '/tuning_params',
+            self.tuning_params_callback,
+            10
+        )
+
         # 제어 루프 타이머 (10Hz)
         self.timer = self.create_timer(0.1, self.control_loop)
 
@@ -159,6 +167,12 @@ class MissionRunner(Node):
 
         self.boat.scan = ranges.tolist()
 
+    def tuning_params_callback(self, msg: Float32MultiArray):
+        """시각화 트랙바에서 실시간 파라미터 조정 수신 -> 즉시 SETTINGS에 반영"""
+        names = ['BOAT_WIDTH', 'AVOID_RANGE', 'GAIN_PSI', 'GAIN_DISTANCE', 'GOAL_RANGE']
+        for name, value in zip(names, msg.data):
+            setattr(SETTINGS, name, float(value))
+
     def waypoint_goal_callback(self, msg: PointStamped):
         """시각화에서 클릭한 웨이포인트 수신"""
         x, y = msg.point.x, msg.point.y
@@ -202,29 +216,29 @@ class MissionRunner(Node):
         # 경로 계획
         psi_error, tau_x = pathplan(self.boat, goal_x, goal_y)
 
+        # 목표 방향/각도 (ENU: arctan2(dy, dx)) - 디버그 로그와 /command
+        # 4번째 값(goal_psi, 시각화 Cost 그래프용)에 공용으로 사용
+        dx = goal_x - self.boat.position[0]
+        dy = goal_y - self.boat.position[1]
+        dist = (dx**2 + dy**2)**0.5
+        goal_heading = np.arctan2(dy, dx) * 180 / np.pi
+        goal_psi = normalize_angle(goal_heading - self.boat.psi)
+
         # 디버그 출력 (2초마다)
         import time
         if not hasattr(self, '_last_debug') or time.time() - self._last_debug > 2:
             self._last_debug = time.time()
-            dx = goal_x - self.boat.position[0]
-            dy = goal_y - self.boat.position[1]
-            dist = (dx**2 + dy**2)**0.5
-            # 목표 방향 계산 (ENU: arctan2(dy, dx))
-            goal_heading = np.arctan2(dy, dx) * 180 / np.pi
-            heading_diff = goal_heading - self.boat.psi
-            # -180~180으로 정규화
-            heading_diff = (heading_diff + 180) % 360 - 180
             self.get_logger().info(
                 f'=== DEBUG ===\n'
                 f'  Boat: pos=({self.boat.position[0]:.1f}, {self.boat.position[1]:.1f}) psi={self.boat.psi:.1f}°\n'
                 f'  Goal: ({goal_x:.1f}, {goal_y:.1f}) dist={dist:.1f}m\n'
-                f'  Direction: goal_heading={goal_heading:.1f}° diff={heading_diff:.1f}°\n'
+                f'  Direction: goal_heading={goal_heading:.1f}° goal_psi={goal_psi:.1f}°\n'
                 f'  Command: psi_error={psi_error:.1f}° tau_x={tau_x:.1f}'
             )
 
-        # 명령 발행
+        # 명령 발행 (4번째 값: goal_psi - 시각화 Cost 그래프용)
         cmd = Float32MultiArray()
-        cmd.data = [float(psi_error), float(tau_x), float(SETTINGS.MAX_THRUST)]
+        cmd.data = [float(psi_error), float(tau_x), float(SETTINGS.MAX_THRUST), float(goal_psi)]
         self.cmd_pub.publish(cmd)
 
         # 디버그: 1초마다 명령 발행 확인
