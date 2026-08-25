@@ -67,24 +67,33 @@ KP = 100.0              # 비례 계수 (각속도 제어용)
 KD = 12.0              # 미분 계수
 MAX_THRUST = 500.0     # 최대 각속도 (rad/s) - 기본 전진 500rpm
 
-# pathplan()의 실측 기준 추력 (장애물 회피가 검증된 비율) - 이 두 값이
-# 모든 추력 기반 모듈(장애물회피, 후진, 호버링 등)의 공용 기준점이다.
-MAX_FORWARD_THRUST = MAX_THRUST * 0.8   # 조향 여유 확보한 최대 전진 추력
-BASE_CRUISE_THRUST = MAX_FORWARD_THRUST * 0.85  # 클리어 경로 기본 순항 추력
+# ============================================================
+# 추력 설정 (장애물 회피 속도 기준)
+# ============================================================
+# pathplan()의 실측 기준 추력 - 모든 모듈의 공용 기준점
+MAX_FORWARD_THRUST = MAX_THRUST * 0.8   # 조향 여유 확보한 최대 전진 (400)
+BASE_CRUISE_THRUST = MAX_FORWARD_THRUST * 0.85  # 기본 순항 속도 (340) ← 장애물 회피 기준
 
-# 기동(Maneuver) 모듈 기본값 - controllers/maneuvers.py
-# 추력은 위 MAX_FORWARD_THRUST 기준 비율로 정의해 장애물회피와 동일한
-# 보트 동역학 튜닝을 그대로 물려받는다.
-BACKWARD_THRUST = MAX_FORWARD_THRUST * 0.5   # 후진 기본 추력
-HOVER_MAX_THRUST = MAX_FORWARD_THRUST * 0.3  # 호버링 복귀 최대 추력 (저속 보정)
+# 속도 티어 (BASE_CRUISE_THRUST 기준)
+FAST_THRUST = MAX_FORWARD_THRUST        # 빠름: 최대 전진 (400) - 클리어 직진
+NORMAL_THRUST = BASE_CRUISE_THRUST      # 보통: 기본 순항 (340) - 장애물 회피/웨이포인트
+SLOW_THRUST = BASE_CRUISE_THRUST * 0.6  # 느림: 저속 (204) - 도킹 접근
+
+# 기동(Maneuver) 모듈 - 장애물 회피 속도와 동일하게 맞춤
+BACKWARD_THRUST = BASE_CRUISE_THRUST * 0.7   # 후진: 238 (70% - 안전하면서 빠르게)
+HOVER_MAX_THRUST = BASE_CRUISE_THRUST * 0.7  # 호버링 복귀: 238 (70% - 빠른 위치 보정)
+ORBIT_THRUST = BASE_CRUISE_THRUST            # 궤도 선회: 340 (장애물 회피와 동일)
+WAYPOINT_THRUST = BASE_CRUISE_THRUST         # 웨이포인트: 340 (장애물 회피와 동일)
+
+# 기동 파라미터
 HOVER_DEADBAND = 0.5             # 호버링 위치 허용 오차 (m)
-DORODORI_HALF_RANGE_DEG = 30.0   # 도리도리 기본 좌우 스윕 범위 (도)
-DORODORI_PERIOD_SEC = 8.0        # 도리도리 기본 왕복 주기 (초)
-ORBIT_DEFAULT_RADIUS = 8.0       # 궤도(로이터링) 기본 반경 (m)
-ORBIT_N_POINTS = 6               # 궤도 웨이포인트 근사 점 개수 (6개 = 60도 간격)
+DORODORI_HALF_RANGE_DEG = 30.0   # 도리도리 좌우 스윕 범위 (도)
+DORODORI_PERIOD_SEC = 6.0        # 도리도리 왕복 주기 (초) - 빠르게
+ORBIT_DEFAULT_RADIUS = 8.0       # 궤도 반경 (m)
+ORBIT_N_POINTS = 6               # 궤도 웨이포인트 (6개 = 60도 간격)
 
-# 부표 색상 설정 (미션용)
-TARGET_BUOY_COLOR = 'green'      # 선회 대상 부표 색상 (green/red/blue)
+# 부표 설정
+TARGET_BUOY_COLOR = 'green'      # 선회 대상 부표 (green/red/blue)
 
 # 센서 설정
 LIDAR_MAX_RANGE = 50.0  # LiDAR 최대 감지 거리 (m)
