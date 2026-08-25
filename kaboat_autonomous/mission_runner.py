@@ -8,16 +8,20 @@ SeaNU_KABOAT2024 main.py 포팅 (ROS2)
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import NavSatFix, Imu, LaserScan
-from std_msgs.msg import Float32MultiArray, Float64
+from std_msgs.msg import Float32MultiArray, Float64, String
 from geometry_msgs.msg import Quaternion, PointStamped
 import numpy as np
 import time
+import json
 from typing import List, Optional
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from controllers.autonomous_module import Boat, pathplan, goal_passed, rotate, normalize_angle
+from controllers.maneuvers import (
+    backward, dorodori, hover, plan_orbit, midpoint_waypoint_from_scan
+)
 
 try:
     from config import settings as SETTINGS
@@ -59,6 +63,14 @@ class MissionRunner(Node):
         self.is_running = False
         self.mission_complete = False
 
+        # 기동(Maneuver) 모드 - 'waypoint'(기본, pathplan 웨이포인트 추종)
+        # | 'backward' | 'dorodori' | 'hover'
+        # orbit/midpoint는 웨이포인트만 계산해서 'waypoint' 모드로 넘긴다
+        # (장애물회피에서 이미 검증된 pathplan()의 추력 로직을 그대로 재사용).
+        self.mode = 'waypoint'
+        self.maneuver_start_time = 0.0
+        self.maneuver_params: dict = {}
+
         # Publishers
         self.cmd_pub = self.create_publisher(Float32MultiArray, '/command', 10)
         self.waypoint_pub = self.create_publisher(Float32MultiArray, '/waypoint', 10)
@@ -96,6 +108,18 @@ class MissionRunner(Node):
             Float32MultiArray,
             '/tuning_params',
             self.tuning_params_callback,
+            10
+        )
+
+        # LLM 등 외부에서 기동 모듈을 트리거하는 JSON 명령
+        # 예: {"cmd": "hover"} {"cmd": "backward", "thrust": 150, "duration": 5}
+        #     {"cmd": "dorodori", "half_range_deg": 30, "duration": 20}
+        #     {"cmd": "orbit", "idx": 45, "radius": 8, "direction": "ccw"}
+        #     {"cmd": "midpoint", "idx1": 10, "idx2": 350}  {"cmd": "stop"}
+        self.create_subscription(
+            String,
+            '/maneuver_cmd',
+            self.maneuver_cmd_callback,
             10
         )
 
@@ -192,8 +216,60 @@ class MissionRunner(Node):
         self.get_logger().info(f'  Distance: {dist:.1f}m')
         self.get_logger().info(f'  is_running={self.is_running}, mission_complete={self.mission_complete}')
 
+    def maneuver_cmd_callback(self, msg: String):
+        """LLM/외부에서 온 JSON 기동 명령 파싱 -> 해당 start_*()로 라우팅"""
+        try:
+            cmd_data = json.loads(msg.data)
+        except (json.JSONDecodeError, TypeError) as e:
+            self.get_logger().error(f'[Maneuver] invalid JSON on /maneuver_cmd: {e}')
+            return
+
+        cmd = cmd_data.get('cmd')
+        try:
+            if cmd == 'backward':
+                self.start_backward(
+                    thrust=cmd_data.get('thrust'),
+                    hold_heading=cmd_data.get('hold_heading'),
+                    duration=cmd_data.get('duration'),
+                )
+            elif cmd == 'dorodori':
+                self.start_dorodori(
+                    center_heading=cmd_data.get('center_heading'),
+                    half_range_deg=cmd_data.get('half_range_deg'),
+                    period_sec=cmd_data.get('period_sec'),
+                    duration=cmd_data.get('duration'),
+                )
+            elif cmd == 'hover':
+                self.start_hover(
+                    hold_x=cmd_data.get('hold_x'),
+                    hold_y=cmd_data.get('hold_y'),
+                    hold_heading=cmd_data.get('hold_heading'),
+                    deadband=cmd_data.get('deadband'),
+                    duration=cmd_data.get('duration'),
+                )
+            elif cmd == 'orbit':
+                self.start_orbit(
+                    idx=int(cmd_data['idx']),
+                    radius=cmd_data.get('radius'),
+                    direction=cmd_data.get('direction', 'cw'),
+                    n_points=cmd_data.get('n_points'),
+                    laps=cmd_data.get('laps', 1.0),
+                )
+            elif cmd == 'midpoint':
+                self.start_midpoint(int(cmd_data['idx1']), int(cmd_data['idx2']))
+            elif cmd == 'stop':
+                self.stop_maneuver()
+            else:
+                self.get_logger().warn(f'[Maneuver] unknown cmd: {cmd}')
+        except (KeyError, ValueError, TypeError) as e:
+            self.get_logger().error(f'[Maneuver] bad params for cmd={cmd}: {e}')
+
     def control_loop(self):
         """10Hz 제어 루프"""
+        if self.mode != 'waypoint':
+            self._run_maneuver_tick()
+            return
+
         if not self.is_running or self.mission_complete:
             return
 
@@ -272,6 +348,122 @@ class MissionRunner(Node):
         cmd.data = [0.0, 0.0, 0.0]
         self.cmd_pub.publish(cmd)
         self.get_logger().info('Mission Stopped')
+
+    # ============================================================
+    # 기동(Maneuver) 모듈 - controllers/maneuvers.py 배선
+    # backward/dorodori/hover는 연속 제어 모드로 control_loop에서 매 tick
+    # 실행되고, orbit/midpoint는 웨이포인트만 계산해 'waypoint' 모드(이미
+    # 검증된 pathplan() 회피 로직)로 넘긴다.
+    # ============================================================
+
+    def _run_maneuver_tick(self):
+        """control_loop에서 self.mode != 'waypoint'일 때 매 tick 호출"""
+        p = self.maneuver_params
+        elapsed = time.time() - self.maneuver_start_time
+        if p.get('duration') is not None and elapsed >= p['duration']:
+            self.get_logger().info(f"[Maneuver] '{self.mode}' finished after {elapsed:.1f}s")
+            self.stop_maneuver()
+            return
+
+        if self.mode == 'backward':
+            psi_error, tau_x = backward(self.boat, thrust=p['thrust'], hold_heading=p['hold_heading'])
+        elif self.mode == 'dorodori':
+            psi_error, tau_x = dorodori(
+                self.boat, p['center_heading'], p['half_range_deg'], elapsed, p['period_sec']
+            )
+        elif self.mode == 'hover':
+            psi_error, tau_x = hover(
+                self.boat, p['hold_x'], p['hold_y'], p['hold_heading'], p['deadband']
+            )
+        else:
+            return
+
+        cmd = Float32MultiArray()
+        cmd.data = [float(psi_error), float(tau_x), float(SETTINGS.MAX_THRUST), 0.0]
+        self.cmd_pub.publish(cmd)
+
+    def start_backward(self, thrust: Optional[float] = None,
+                        hold_heading: Optional[float] = None,
+                        duration: Optional[float] = None):
+        """후진 시작. hold_heading 생략 시 시작 시점 헤딩을 그대로 유지."""
+        self.mode = 'backward'
+        self.maneuver_start_time = time.time()
+        self.maneuver_params = {
+            'thrust': thrust,
+            'hold_heading': hold_heading if hold_heading is not None else self.boat.psi,
+            'duration': duration,
+        }
+        self.is_running = True
+        self.get_logger().info(f'[Maneuver] backward started: {self.maneuver_params}')
+
+    def start_dorodori(self, center_heading: Optional[float] = None,
+                        half_range_deg: Optional[float] = None,
+                        period_sec: Optional[float] = None,
+                        duration: Optional[float] = None):
+        """도리도리(헤딩 좌우 스윕) 시작. center_heading 생략 시 시작 시점 헤딩 기준."""
+        self.mode = 'dorodori'
+        self.maneuver_start_time = time.time()
+        self.maneuver_params = {
+            'center_heading': center_heading if center_heading is not None else self.boat.psi,
+            'half_range_deg': half_range_deg,
+            'period_sec': period_sec,
+            'duration': duration,
+        }
+        self.is_running = True
+        self.get_logger().info(f'[Maneuver] dorodori started: {self.maneuver_params}')
+
+    def start_hover(self, hold_x: Optional[float] = None, hold_y: Optional[float] = None,
+                     hold_heading: Optional[float] = None,
+                     deadband: Optional[float] = None,
+                     duration: Optional[float] = None):
+        """호버링(위치 유지) 시작. hold_x/y 생략 시 시작 시점 위치를 그대로 유지."""
+        self.mode = 'hover'
+        self.maneuver_start_time = time.time()
+        self.maneuver_params = {
+            'hold_x': hold_x if hold_x is not None else self.boat.position[0],
+            'hold_y': hold_y if hold_y is not None else self.boat.position[1],
+            'hold_heading': hold_heading,
+            'deadband': deadband,
+            'duration': duration,
+        }
+        self.is_running = True
+        self.get_logger().info(f'[Maneuver] hover started: {self.maneuver_params}')
+
+    def start_orbit(self, idx: int, radius: Optional[float] = None, direction: str = 'cw',
+                     n_points: Optional[int] = None, laps: float = 1.0) -> bool:
+        """
+        LiDAR scan[idx] 지점 주위를 도는 웨이포인트를 계산해 'waypoint' 모드로
+        추종시킨다 (장애물회피에서 검증된 pathplan() 추력 로직을 그대로 사용).
+        """
+        wps = plan_orbit(self.boat, idx, radius=radius, direction=direction,
+                          n_points=n_points, laps=laps)
+        if not wps:
+            self.get_logger().warn(f'[Maneuver] orbit: no valid LiDAR point at idx={idx}')
+            return False
+
+        self.mode = 'waypoint'
+        self.set_waypoints(wps)
+        self.start()
+        self.get_logger().info(f'[Maneuver] orbit started: idx={idx} n_wp={len(wps)} dir={direction}')
+        return True
+
+    def start_midpoint(self, idx1: int, idx2: int) -> bool:
+        """LiDAR 두 점의 중점을 단일 웨이포인트로 삼아 'waypoint' 모드로 추종시킨다."""
+        wp = midpoint_waypoint_from_scan(self.boat, idx1, idx2)
+        if wp is None:
+            self.get_logger().warn(f'[Maneuver] midpoint: invalid LiDAR idx {idx1},{idx2}')
+            return False
+
+        self.mode = 'waypoint'
+        self.set_waypoints([wp])
+        self.start()
+        self.get_logger().info(f'[Maneuver] midpoint waypoint set: {wp}')
+        return True
+
+    def stop_maneuver(self):
+        """현재 기동 모드를 종료하고 정지 상태로 되돌린다."""
+        self.mode = 'waypoint'
+        self.stop()
 
     def wait(self, seconds: float):
         """대기 (호핑투어 3초 정지용)"""

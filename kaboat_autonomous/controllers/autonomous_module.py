@@ -255,10 +255,10 @@ def pathplan(boat: Boat, goal_x: float, goal_y: float) -> Tuple[float, float]:
     print(f'[pathplan] lidar_nonzero={lidar_nonzero}/360 front={front_dist:.1f}m is_clear={is_clear}')
     print(f'[pathplan] optimal_psi={psi_error}° (before override)')
 
-    # 추진력 계산 (VRX: 각속도 rad/s)
-    # MAX_THRUST의 70%를 최대로 사용 (30%는 조향용 여유)
-    max_forward = SETTINGS.MAX_THRUST * 0.8  # 조향 여유 확보
-    base_thrust = max_forward * 0.85  # 기본 추력
+    # 추진력 계산 (VRX: 각속도 rad/s) - settings.py의 공용 기준값 사용
+    # (backward/hover 등 다른 기동 모듈도 동일 기준을 공유한다)
+    max_forward = SETTINGS.MAX_FORWARD_THRUST
+    base_thrust = SETTINGS.BASE_CRUISE_THRUST
 
     if is_clear:
         # 장애물 없음 - 목표 방향으로 직진
