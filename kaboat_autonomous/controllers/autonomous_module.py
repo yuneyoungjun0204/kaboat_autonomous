@@ -40,6 +40,56 @@ def normalize_angle(angle: float) -> float:
     return (angle + 180) % 360 - 180
 
 
+def smooth_lidar_exponential(scan: List[float], window: int = 3, decay: float = 0.5) -> List[float]:
+    """
+    LiDAR 데이터 지수 평균 스무딩.
+
+    각 인덱스 i에 대해 주변 인덱스들(i-window ~ i+window)의 가중 평균 계산.
+    가까운 인덱스일수록 가중치 높음 (지수 감쇠).
+
+    Args:
+        scan: 원본 LiDAR 스캔 데이터 (360개)
+        window: 좌우 참조 범위 (기본 3 = i-3 ~ i+3)
+        decay: 감쇠율 (0.5 = 한 칸 멀어질 때마다 가중치 절반)
+
+    Returns:
+        스무딩된 LiDAR 데이터
+
+    효과:
+        - 단일 노이즈 포인트 완화
+        - 좁은 틈새를 장애물로 인식 (안전성 향상)
+        - 주변 장애물이 현재 방향에 영향을 줌
+    """
+    n = len(scan)
+    if n == 0:
+        return scan
+
+    smoothed = [0.0] * n
+
+    for i in range(n):
+        weighted_sum = 0.0
+        weight_total = 0.0
+
+        for offset in range(-window, window + 1):
+            j = (i + offset) % n  # 원형 인덱스 (0-359)
+
+            # 0인 값(무효)은 무시하되, 주변이 모두 0이면 0 유지
+            if scan[j] <= 0:
+                continue
+
+            # 지수 감쇠 가중치: e^(-|offset| * decay)
+            weight = exp(-abs(offset) * decay)
+            weighted_sum += scan[j] * weight
+            weight_total += weight
+
+        if weight_total > 0:
+            smoothed[i] = weighted_sum / weight_total
+        else:
+            smoothed[i] = scan[i]  # 주변 모두 무효 시 원본 유지
+
+    return smoothed
+
+
 # 실측(2026-08-25) 검증: HEADING_CMD_OFFSET_DEG=-90을 적용한 상태로 20초간
 # 라이브 텔레메트리를 보니 psi_error는 0으로 "수렴"했다고 나오는데, 실제
 # boat.psi - goal_heading(atan2(dy,dx))의 차이는 -90도에 고정되고 목표까지
@@ -236,19 +286,28 @@ def pathplan(boat: Boat, goal_x: float, goal_y: float) -> Tuple[float, float]:
     goal_psi = normalize_angle(goal_psi)
     goal_distance = np.sqrt(dx ** 2 + dy ** 2)
 
+    # LiDAR 지수 평균 스무딩 (주변 장애물 영향 반영)
+    # window=3: i-3 ~ i+3 범위 참조
+    # decay=0.6: 한 칸 멀어질 때마다 가중치 ~55% 감소
+    smoothed_scan = smooth_lidar_exponential(boat.scan, window=3, decay=0.6)
+
     # 디버그: LiDAR 데이터 확인
     lidar_nonzero = sum(1 for x in boat.scan if x > 0)
-    front_dist = boat.scan[0] if len(boat.scan) > 0 else -1
+    front_dist = smoothed_scan[0] if len(smoothed_scan) > 0 else -1
 
     if len(boat.scan) == 0:
         return (0.0, 0.0)
 
-    # 안전 구역 계산
-    safe_ld = calculate_safe_zone(boat.scan)
-    psi_error = calculate_optimal_psi_d(boat.scan, safe_ld, int(goal_psi))
+    # 안전 구역 계산 (스무딩된 데이터 사용)
+    safe_ld = calculate_safe_zone(smoothed_scan)
+    psi_error = calculate_optimal_psi_d(smoothed_scan, safe_ld, int(goal_psi))
 
-    # goal_check 결과 저장 (한 번만 호출)
+    # goal_check 결과 저장 (스무딩된 스캔으로 체크)
+    # 임시로 boat.scan을 스무딩된 것으로 교체해서 체크
+    original_scan = boat.scan
+    boat.scan = smoothed_scan
     is_clear = goal_check(boat, goal_distance, goal_psi)
+    boat.scan = original_scan  # 원본 복원
 
     # 디버그 출력
     print(f'[pathplan] boat.psi={boat.psi:.1f}° goal_heading={goal_heading:.1f}° goal_psi={goal_psi:.1f}°')
@@ -277,7 +336,7 @@ def pathplan(boat: Boat, goal_x: float, goal_y: float) -> Tuple[float, float]:
         tx_angle_max = max_forward
         angle_danger = 45
 
-        dist = boat.scan[0] if boat.scan[0] > 0 else SETTINGS.LIDAR_MAX_RANGE
+        dist = smoothed_scan[0] if smoothed_scan[0] > 0 else SETTINGS.LIDAR_MAX_RANGE
 
         # 거리 기반 속도 계산
         if dist <= dist_danger:

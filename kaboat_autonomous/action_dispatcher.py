@@ -138,6 +138,8 @@ class ActionDispatcher(Node):
                 self._init_waypoints(cmd)
             elif action == 'stop':
                 self._stop()
+            elif action == 'align':
+                pass  # align은 control_loop에서 처리
             elif action == 'analyze':
                 self._publish_analysis()
                 self.current_action = None
@@ -225,6 +227,8 @@ class ActionDispatcher(Node):
             psi_error, tau_x = self._exec_dorodori()
         elif self.current_action == 'hover':
             psi_error, tau_x = self._exec_hover()
+        elif self.current_action == 'align':
+            psi_error, tau_x = self._exec_align()
         elif self.current_action in ('orbit', 'gate_pass', 'waypoints'):
             psi_error, tau_x = self._exec_waypoint_follow()
 
@@ -294,6 +298,29 @@ class ActionDispatcher(Node):
             return 0.0, 0.0
 
         return maneuvers.hover(self.boat, hold_x, hold_y)
+
+    def _exec_align(self):
+        """헤딩 정렬"""
+        target_heading = self.action_params.get('heading', 0.0)
+        tolerance = self.action_params.get('tolerance', 5.0)
+        timeout = self.action_params.get('timeout', 10.0)
+
+        # 타임아웃 체크
+        if self.action_elapsed >= timeout:
+            self.get_logger().info('align: timeout')
+            self.current_action = None
+            return 0.0, 0.0
+
+        psi_error, tau_x, aligned = maneuvers.align_to_heading(
+            self.boat, target_heading, tolerance
+        )
+
+        if aligned:
+            self.get_logger().info(f'align: aligned to {target_heading:.1f}°')
+            self.current_action = None
+            return 0.0, 0.0
+
+        return psi_error, tau_x
 
     def _exec_waypoint_follow(self):
         """웨이포인트 순차 추종 (orbit, gate_pass, waypoints)"""

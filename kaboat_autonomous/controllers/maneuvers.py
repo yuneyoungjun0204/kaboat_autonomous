@@ -138,6 +138,36 @@ def dorodori(boat: Boat, center_heading: float, half_range_deg: float = None,
 
 
 # ============================================================
+# 2.5. 헤딩 정렬 (Align to Heading) - 특정 각도로 정렬
+# ============================================================
+
+def align_to_heading(boat: Boat, target_heading: float,
+                      tolerance: float = 5.0) -> Tuple[float, float, bool]:
+    """
+    특정 헤딩으로 정렬 (전진 없이 회전만).
+
+    LLM 사용 시나리오:
+    - "북쪽을 향해" → align_to_heading(boat, 90)
+    - "게이트 방향으로 정렬" → align_to_heading(boat, gate_heading)
+    - 부표 접근 전 방향 정렬
+
+    Args:
+        boat: 보트 상태
+        target_heading: 목표 헤딩(도, ENU: 0=동, 90=북)
+        tolerance: 허용 오차(도), 이내면 정렬 완료
+
+    Returns:
+        (psi_error, tau_x, aligned):
+        - psi_error: 조향 오차(도)
+        - tau_x: 0 (전진 없음)
+        - aligned: True면 정렬 완료
+    """
+    psi_error = normalize_angle(target_heading - boat.psi)
+    aligned = abs(psi_error) < tolerance
+    return (float(psi_error), 0.0, aligned)
+
+
+# ============================================================
 # 3. LiDAR 두 점의 중점에 웨이포인트
 # ============================================================
 

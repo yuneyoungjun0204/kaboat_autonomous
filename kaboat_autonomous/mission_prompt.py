@@ -32,6 +32,9 @@ SYSTEM_PROMPT = """# KABOAT 자율주행 미션 수행 시스템
 
 // 위치 유지 (도킹, 호핑투어 정지)
 {"action": "hover", "x": 5.0, "y": 5.0, "duration": 3.0}
+
+// 헤딩 정렬 (특정 방향으로 정렬, 전진 없음)
+{"action": "align", "heading": 90.0, "tolerance": 5.0, "timeout": 10.0}
 ```
 
 ### 웨이포인트 생성 모듈

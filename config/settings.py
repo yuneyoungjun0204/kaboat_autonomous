@@ -65,25 +65,28 @@ GOAL_RANGE = 3.0       # 웨이포인트 도착 판정 거리 (m)
 # max_thrust_cmd ≈ 2354 rad/s (VRX 설정)
 KP = 100.0              # 비례 계수 (각속도 제어용)
 KD = 12.0              # 미분 계수
-MAX_THRUST = 500.0     # 최대 각속도 (rad/s) - 기본 전진 500rpm
+MAX_THRUST = 1200.0    # 최대 각속도 (rad/s) - VRX 스러스터 최대
 
 # ============================================================
 # 추력 설정 (장애물 회피 속도 기준)
 # ============================================================
-# pathplan()의 실측 기준 추력 - 모든 모듈의 공용 기준점
-MAX_FORWARD_THRUST = MAX_THRUST * 0.8   # 조향 여유 확보한 최대 전진 (400)
-BASE_CRUISE_THRUST = MAX_FORWARD_THRUST * 0.85  # 기본 순항 속도 (340) ← 장애물 회피 기준
+# 속도 티어 (직접 지정)
+FAST_THRUST = 1000.0       # 빠름: 클리어 직진
+NORMAL_THRUST = 500.0      # 보통: 장애물 회피 = 기준
+SLOW_THRUST = 300.0        # 느림: 도킹 접근
 
-# 속도 티어 (BASE_CRUISE_THRUST 기준)
-FAST_THRUST = MAX_FORWARD_THRUST        # 빠름: 최대 전진 (400) - 클리어 직진
-NORMAL_THRUST = BASE_CRUISE_THRUST      # 보통: 기본 순항 (340) - 장애물 회피/웨이포인트
-SLOW_THRUST = BASE_CRUISE_THRUST * 0.6  # 느림: 저속 (204) - 도킹 접근
+# pathplan()의 기준 추력
+MAX_FORWARD_THRUST = FAST_THRUST         # 최대 전진 (1000)
+BASE_CRUISE_THRUST = NORMAL_THRUST       # 기본 순항 (500) ← 장애물 회피 기준
 
-# 기동(Maneuver) 모듈 - 장애물 회피 속도와 동일하게 맞춤
-BACKWARD_THRUST = BASE_CRUISE_THRUST * 0.7   # 후진: 238 (70% - 안전하면서 빠르게)
-HOVER_MAX_THRUST = BASE_CRUISE_THRUST * 0.7  # 호버링 복귀: 238 (70% - 빠른 위치 보정)
-ORBIT_THRUST = BASE_CRUISE_THRUST            # 궤도 선회: 340 (장애물 회피와 동일)
-WAYPOINT_THRUST = BASE_CRUISE_THRUST         # 웨이포인트: 340 (장애물 회피와 동일)
+# 기동(Maneuver) 모듈 - NORMAL_THRUST 기준
+BACKWARD_THRUST = NORMAL_THRUST * 0.6    # 후진: 300 (안전하면서 빠르게)
+HOVER_MAX_THRUST = SLOW_THRUST           # 호버링 복귀: 300 (위치 벗어나면 복귀, 도착하면 0)
+ORBIT_THRUST = NORMAL_THRUST             # 궤도 선회: 500 (장애물 회피와 동일)
+WAYPOINT_THRUST = NORMAL_THRUST          # 웨이포인트: 500 (장애물 회피와 동일)
+
+# 정지 출력 (stop, hover 도착 시)
+STOP_THRUST = 0.0                        # 정지: 0 (모터 출력 없음)
 
 # 기동 파라미터
 HOVER_DEADBAND = 0.5             # 호버링 위치 허용 오차 (m)
