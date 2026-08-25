@@ -6,16 +6,17 @@ autonomous_module.py와 동일한 스타일: ROS 의존성 없는 순수 함수.
 (장애물회피 pathplan()과 동일한 MAX_FORWARD_THRUST 기반 비율).
 
 mission_runner.py에 /maneuver_cmd(JSON) 토픽으로 배선되어 있다:
-start_backward()/start_dorodori()/start_hover()/start_orbit()/start_midpoint().
+start_align()/start_backward()/start_dorodori()/start_hover()/start_orbit()/start_midpoint().
 
 구현된 모듈 (난이도 순):
-1. backward()            - 헤딩 유지 후진
-2. dorodori()            - 지정 각도 중심 ±범위 좌우 스윕
-3. midpoint_waypoint()   - LiDAR 두 점의 중점에 웨이포인트
-4. plan_orbit()          - LiDAR 한 점 주위를 반경 x(m)로 궤도(로이터링)
-5. hover()               - 위치 유지(호버링), 목표가 후방이면 후진으로 보정
-6. navigate_avoid()      - 장애물 회피 항법 (pathplan 래핑)
-7. navigate_direct()     - 직진 항법 (장애물 회피 없음)
+1. align()               - 지정 각도로 제자리 회전 정렬 (전진/후진 없음)
+2. backward()            - 헤딩 유지 후진
+3. dorodori()            - 지정 각도 중심 ±범위 좌우 스윕
+4. midpoint_waypoint()   - LiDAR 두 점의 중점에 웨이포인트
+5. plan_orbit()          - LiDAR 한 점 주위를 반경 x(m)로 궤도(로이터링)
+6. hover()               - 위치 유지(호버링), 목표가 후방이면 후진으로 보정
+7. navigate_avoid()      - 장애물 회피 항법 (pathplan 래핑)
+8. navigate_direct()     - 직진 항법 (장애물 회피 없음)
 
 LLM 사용 예시:
   - "장애물이 많다" → navigate_avoid(boat, goal_x, goal_y)
@@ -66,7 +67,34 @@ def scan_point_to_global(boat: Boat, idx: int) -> Optional[Tuple[float, float]]:
 
 
 # ============================================================
-# 1. 후진 (Backward) - 가장 단순: 헤딩을 유지하며 역추진
+# 1. 정렬 (Align) - 가장 단순: 제자리에서 지정 각도로 회전만 한다
+# ============================================================
+
+def align(boat: Boat, target_heading: float, deadband: float = None) -> Tuple[float, float]:
+    """
+    제자리에서 target_heading(도)으로 회전 정렬한다. 전진/후진 없음(tau_x=0).
+
+    Args:
+        boat: 보트 상태
+        target_heading: 정렬 목표 헤딩(도, ENU CCW+)
+        deadband: 이 오차(도) 이내면 정렬 완료로 보고 회전도 멈춘다
+                  (기본 SETTINGS.ALIGN_DEADBAND_DEG) - 목표 각도 근처에서
+                  좌우로 미세하게 흔들리는 헌팅을 방지
+
+    Returns:
+        (psi_error, tau_x=0). deadband 이내면 psi_error도 0.0을 반환.
+    """
+    if deadband is None:
+        deadband = SETTINGS.ALIGN_DEADBAND_DEG
+
+    psi_error = normalize_angle(target_heading - boat.psi)
+    if abs(psi_error) < deadband:
+        return (0.0, 0.0)
+    return (float(psi_error), 0.0)
+
+
+# ============================================================
+# 2. 후진 (Backward) - 헤딩을 유지하며 역추진
 # ============================================================
 
 def backward(boat: Boat, thrust: float = None,
@@ -96,7 +124,7 @@ def backward(boat: Boat, thrust: float = None,
 
 
 # ============================================================
-# 2. 도리도리 (Heading Sweep) - 지정 각도 중심 ±half_range를 사인파로 스윕
+# 3. 도리도리 (Heading Sweep) - 지정 각도 중심 ±half_range를 사인파로 스윕
 # ============================================================
 
 def dorodori_target_heading(center_heading: float, half_range_deg: float,
@@ -138,7 +166,7 @@ def dorodori(boat: Boat, center_heading: float, half_range_deg: float = None,
 
 
 # ============================================================
-# 3. LiDAR 두 점의 중점에 웨이포인트
+# 4. LiDAR 두 점의 중점에 웨이포인트
 # ============================================================
 
 def midpoint_waypoint(boat: Boat, angle1_deg: float, dist1: float,
@@ -159,7 +187,7 @@ def midpoint_waypoint_from_scan(boat: Boat, idx1: int, idx2: int) -> Optional[Tu
 
 
 # ============================================================
-# 4. 궤도/로이터링 (Orbit) - LiDAR 한 점 주위를 반경 radius(m)로 회전
+# 5. 궤도/로이터링 (Orbit) - LiDAR 한 점 주위를 반경 radius(m)로 회전
 # ============================================================
 
 def generate_orbit_waypoints(center: Tuple[float, float], radius: float,
@@ -227,7 +255,7 @@ def plan_orbit(boat: Boat, idx: int, radius: float = None, direction: str = 'cw'
 
 
 # ============================================================
-# 5. 호버링 (Hovering / Station Keeping) - 가장 복잡: 위치 유지 + 후방이면 후진
+# 6. 호버링 (Hovering / Station Keeping) - 가장 복잡: 위치 유지 + 후방이면 후진
 # ============================================================
 
 def hover(boat: Boat, hold_x: float, hold_y: float,
@@ -278,7 +306,7 @@ def hover(boat: Boat, hold_x: float, hold_y: float,
 
 
 # ============================================================
-# 6. 장애물 회피 항법 (Navigate with Avoidance)
+# 7. 장애물 회피 항법 (Navigate with Avoidance)
 # ============================================================
 
 def navigate_avoid(boat: Boat, goal_x: float, goal_y: float) -> Tuple[float, float]:
@@ -346,7 +374,7 @@ def navigate_direct(boat: Boat, goal_x: float, goal_y: float,
 
 
 # ============================================================
-# 7. 유틸리티: 목표 도달 확인
+# 8. 유틸리티: 목표 도달 확인
 # ============================================================
 
 def is_goal_reached(boat: Boat, goal_x: float, goal_y: float,
@@ -387,7 +415,7 @@ def get_goal_info(boat: Boat, goal_x: float, goal_y: float) -> dict:
 
 
 # ============================================================
-# 8. LiDAR 분석 유틸리티 (LLM 상황 판단용)
+# 9. LiDAR 분석 유틸리티 (LLM 상황 판단용)
 # ============================================================
 
 def analyze_lidar(boat: Boat) -> dict:

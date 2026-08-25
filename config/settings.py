@@ -80,6 +80,7 @@ HOVER_MAX_THRUST = MAX_FORWARD_THRUST * 0.3  # 호버링 복귀 최대 추력 (�
 HOVER_DEADBAND = 0.5             # 호버링 위치 허용 오차 (m)
 DORODORI_HALF_RANGE_DEG = 30.0   # 도리도리 기본 좌우 스윕 범위 (도)
 DORODORI_PERIOD_SEC = 8.0        # 도리도리 기본 왕복 주기 (초)
+ALIGN_DEADBAND_DEG = 3.0         # 정렬 완료 판정 허용 오차 (도) - 헌팅 방지
 ORBIT_DEFAULT_RADIUS = 8.0       # 궤도(로이터링) 기본 반경 (m)
 ORBIT_N_POINTS = 16              # 궤도 웨이포인트 근사 점 개수
 
