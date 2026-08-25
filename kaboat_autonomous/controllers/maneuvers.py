@@ -10,10 +10,19 @@ start_backward()/start_dorodori()/start_hover()/start_orbit()/start_midpoint().
 
 구현된 모듈 (난이도 순):
 1. backward()            - 헤딩 유지 후진
-2. dorodori()             - 지정 각도 중심 ±범위 좌우 스윕
-3. midpoint_waypoint()    - LiDAR 두 점의 중점에 웨이포인트
-4. plan_orbit()           - LiDAR 한 점 주위를 반경 x(m)로 궤도(로이터링)
-5. hover()                - 위치 유지(호버링), 목표가 후방이면 후진으로 보정
+2. dorodori()            - 지정 각도 중심 ±범위 좌우 스윕
+3. midpoint_waypoint()   - LiDAR 두 점의 중점에 웨이포인트
+4. plan_orbit()          - LiDAR 한 점 주위를 반경 x(m)로 궤도(로이터링)
+5. hover()               - 위치 유지(호버링), 목표가 후방이면 후진으로 보정
+6. navigate_avoid()      - 장애물 회피 항법 (pathplan 래핑)
+7. navigate_direct()     - 직진 항법 (장애물 회피 없음)
+
+LLM 사용 예시:
+  - "장애물이 많다" → navigate_avoid(boat, goal_x, goal_y)
+  - "경로 깨끗하다" → navigate_direct(boat, goal_x, goal_y)
+  - "stuck됐다"    → backward(boat)
+  - "게이트 통과"  → midpoint_waypoint(boat, idx1, idx2) → navigate_direct()
+  - "부표 선회"    → plan_orbit(boat, idx) → 웨이포인트 리스트
 """
 import numpy as np
 from typing import List, Optional, Tuple
@@ -266,3 +275,173 @@ def hover(boat: Boat, hold_x: float, hold_y: float,
         return (float(psi_error_rev), -float(tau_x))
 
     return (float(psi_error), float(tau_x))
+
+
+# ============================================================
+# 6. 장애물 회피 항법 (Navigate with Avoidance)
+# ============================================================
+
+def navigate_avoid(boat: Boat, goal_x: float, goal_y: float) -> Tuple[float, float]:
+    """
+    장애물 회피를 적용한 웨이포인트 항법.
+    autonomous_module.pathplan()을 래핑.
+
+    LLM 사용 시나리오:
+    - "장애물이 많다" / "LiDAR에 물체가 보인다" → 이 함수 사용
+    - stuck 상태에서 벗어난 후 정상 항법 재개
+
+    Args:
+        boat: 보트 상태 (position, psi, scan 필요)
+        goal_x, goal_y: 목표 좌표 (전역 좌표)
+
+    Returns:
+        (psi_error, tau_x): 조향 오차(도), 추진력
+    """
+    try:
+        from .autonomous_module import pathplan
+    except ImportError:
+        from autonomous_module import pathplan
+
+    return pathplan(boat, goal_x, goal_y)
+
+
+def navigate_direct(boat: Boat, goal_x: float, goal_y: float,
+                    thrust: float = None) -> Tuple[float, float]:
+    """
+    장애물 회피 없이 목표 방향으로 직진.
+
+    LLM 사용 시나리오:
+    - "경로가 깨끗하다" / "장애물 없다"
+    - 게이트 중간점으로 짧은 거리 이동
+    - 정밀 접근 (회피 알고리즘이 오히려 방해될 때)
+
+    Args:
+        boat: 보트 상태
+        goal_x, goal_y: 목표 좌표
+        thrust: 추진력 (기본 BASE_CRUISE_THRUST)
+
+    Returns:
+        (psi_error, tau_x)
+    """
+    if thrust is None:
+        thrust = SETTINGS.BASE_CRUISE_THRUST
+
+    dx = goal_x - boat.position[0]
+    dy = goal_y - boat.position[1]
+    dist = np.sqrt(dx ** 2 + dy ** 2)
+
+    # 목표 방향 계산 (ENU: arctan2(dy, dx))
+    goal_heading = np.degrees(np.arctan2(dy, dx))
+    psi_error = normalize_angle(goal_heading - boat.psi)
+
+    # 거리에 따른 추력 조절 (가까워지면 감속)
+    if dist < SETTINGS.GOAL_RANGE * 2:
+        thrust = thrust * (dist / (SETTINGS.GOAL_RANGE * 2))
+
+    # 큰 각도 오차 시 회전 우선 (추력 감소)
+    if abs(psi_error) > 30:
+        thrust = thrust * 0.3
+
+    return (float(psi_error), float(thrust))
+
+
+# ============================================================
+# 7. 유틸리티: 목표 도달 확인
+# ============================================================
+
+def is_goal_reached(boat: Boat, goal_x: float, goal_y: float,
+                    threshold: float = None) -> bool:
+    """목표 지점 도착 여부 확인."""
+    if threshold is None:
+        threshold = SETTINGS.GOAL_RANGE
+
+    dx = goal_x - boat.position[0]
+    dy = goal_y - boat.position[1]
+    return (dx ** 2 + dy ** 2) < threshold ** 2
+
+
+def get_goal_info(boat: Boat, goal_x: float, goal_y: float) -> dict:
+    """
+    목표까지의 거리/방향 정보 반환 (LLM 상황 판단용).
+
+    Returns:
+        {
+            'distance': 거리(m),
+            'bearing': 절대 방향(도),
+            'relative_bearing': 상대 방향(도, 양수=좌현),
+            'is_reached': 도착 여부
+        }
+    """
+    dx = goal_x - boat.position[0]
+    dy = goal_y - boat.position[1]
+    dist = float(np.sqrt(dx ** 2 + dy ** 2))
+    bearing = float(np.degrees(np.arctan2(dy, dx)))
+    relative = float(normalize_angle(bearing - boat.psi))
+
+    return {
+        'distance': round(dist, 1),
+        'bearing': round(bearing, 1),
+        'relative_bearing': round(relative, 1),
+        'is_reached': dist < SETTINGS.GOAL_RANGE
+    }
+
+
+# ============================================================
+# 8. LiDAR 분석 유틸리티 (LLM 상황 판단용)
+# ============================================================
+
+def analyze_lidar(boat: Boat) -> dict:
+    """
+    LiDAR 데이터 요약 (LLM이 상황 판단에 사용).
+
+    Returns:
+        {
+            'front_clear': 전방 10m 이내 장애물 없음,
+            'left_clear': 좌현 클리어,
+            'right_clear': 우현 클리어,
+            'closest_obstacle': {'angle': 도, 'distance': m},
+            'gate_detected': 게이트 패턴 감지 여부,
+            'obstacle_count': 장애물 개수
+        }
+    """
+    scan = np.array(boat.scan)
+    valid = (scan > 0) & (scan < SETTINGS.LIDAR_MAX_RANGE)
+
+    # 섹터별 분석
+    def sector_clear(start, end, threshold=10.0):
+        indices = np.arange(start, end) % 360
+        sector = scan[indices]
+        sector_valid = sector[(sector > 0) & (sector < SETTINGS.LIDAR_MAX_RANGE)]
+        return len(sector_valid) == 0 or np.min(sector_valid) > threshold
+
+    # 가장 가까운 장애물
+    closest_angle = -1
+    closest_dist = 999.0
+    if np.any(valid):
+        valid_indices = np.where(valid)[0]
+        valid_dists = scan[valid_indices]
+        min_idx = np.argmin(valid_dists)
+        closest_angle = int(valid_indices[min_idx])
+        closest_dist = float(valid_dists[min_idx])
+
+    # 게이트 패턴 감지 (양쪽에 대칭적 장애물)
+    gate_detected = False
+    left_obs = scan[20:70]
+    right_obs = scan[290:340]
+    left_valid = left_obs[(left_obs > 0) & (left_obs < 20)]
+    right_valid = right_obs[(right_obs > 0) & (right_obs < 20)]
+    if len(left_valid) > 0 and len(right_valid) > 0:
+        if abs(np.min(left_valid) - np.min(right_valid)) < 5:
+            gate_detected = True
+
+    return {
+        'front_clear': bool(sector_clear(350, 370, 10.0) and sector_clear(0, 10, 10.0)),
+        'left_clear': bool(sector_clear(60, 120, 8.0)),
+        'right_clear': bool(sector_clear(240, 300, 8.0)),
+        'closest_obstacle': {
+            'angle': int(closest_angle),
+            'distance': round(float(closest_dist), 1)
+        },
+        'gate_detected': bool(gate_detected),
+        'obstacle_count': int(np.sum(valid))
+    }

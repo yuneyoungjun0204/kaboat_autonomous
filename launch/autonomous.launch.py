@@ -20,10 +20,12 @@ def generate_launch_description():
                 /world/kaboat_course/model/wamv/link/wamv/gps_wamv_link/sensor/navsat/navsat@sensor_msgs/msg/NavSatFix[gz.msgs.NavSat \
                 /world/kaboat_course/model/wamv/link/wamv/imu_wamv_link/sensor/imu_wamv_sensor/imu@sensor_msgs/msg/Imu[gz.msgs.IMU \
                 /world/kaboat_course/model/wamv/link/wamv/base_link/sensor/lidar_wamv_sensor/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan \
+                /world/kaboat_course/model/wamv/link/wamv/base_link/sensor/front_left_camera_sensor/image@sensor_msgs/msg/Image[gz.msgs.Image \
                 --ros-args \
                 -r /world/kaboat_course/model/wamv/link/wamv/gps_wamv_link/sensor/navsat/navsat:=/wamv/sensors/gps/fix \
                 -r /world/kaboat_course/model/wamv/link/wamv/imu_wamv_link/sensor/imu_wamv_sensor/imu:=/wamv/sensors/imu/data \
-                -r /world/kaboat_course/model/wamv/link/wamv/base_link/sensor/lidar_wamv_sensor/scan:=/wamv/sensors/lidar/scan
+                -r /world/kaboat_course/model/wamv/link/wamv/base_link/sensor/lidar_wamv_sensor/scan:=/wamv/sensors/lidar/scan \
+                -r /world/kaboat_course/model/wamv/link/wamv/base_link/sensor/front_left_camera_sensor/image:=/wamv/sensors/camera/image_raw
         '''],
         name='sensor_bridge',
         output='screen'
@@ -65,6 +67,30 @@ def generate_launch_description():
         output='screen'
     )
 
+    # LLM 인터페이스 (ros-mcp 연동)
+    llm_interface = Node(
+        package='kaboat_autonomous',
+        executable='llm_interface',
+        name='llm_interface',
+        output='screen'
+    )
+
+    # 액션 디스패처 (LLM 명령 → 모듈 실행)
+    action_dispatcher = Node(
+        package='kaboat_autonomous',
+        executable='action_dispatcher',
+        name='action_dispatcher',
+        output='screen'
+    )
+
+    # 센서 통합 (LLM 멀티모달 입력용)
+    sensor_fusion = Node(
+        package='kaboat_autonomous',
+        executable='sensor_fusion',
+        name='sensor_fusion',
+        output='screen'
+    )
+
     # 보트 릴리즈 (플랫폼에서 분리) - 5초 후 실행
     release_boat = TimerAction(
         period=5.0,
@@ -87,5 +113,8 @@ def generate_launch_description():
         motor_controller,
         mission_runner,
         integrated_visualizer,
+        llm_interface,
+        action_dispatcher,
+        sensor_fusion,
         release_boat,
     ])

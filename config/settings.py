@@ -54,9 +54,9 @@ IS_SIMULATOR = True
 
 # 자율주행 파라미터
 BOAT_WIDTH = 2.5       # WAM-V 폭 (m)
-AVOID_RANGE = 25.0      # 장애물 회피 거리 (m)
+AVOID_RANGE = 30.0      # 장애물 회피 거리 (m)
 GAIN_PSI = 1.0         # 목적지 각도 가중치
-GAIN_DISTANCE = 1.5    # 거리 가중치
+GAIN_DISTANCE = 10.0    # 거리 가중치
 GOAL_RANGE = 3.0       # 웨이포인트 도착 판정 거리 (m)
 
 # PD 제어 파라미터
@@ -96,3 +96,71 @@ TOPICS = {
     'thrust_left': '/wamv/thrusters/left/thrust',
     'thrust_right': '/wamv/thrusters/right/thrust',
 }
+
+# ============================================================
+# 미션 웨이포인트 (GPS 위경도)
+# ============================================================
+MISSION_WAYPOINTS_GPS = {
+    'start': {
+        'lat': -33.72276217109793,
+        'lon': 150.67402781112585,
+        'desc': '시작점'
+    },
+    'gate_start': {
+        'lat': -33.72264316313711,
+        'lon': 150.67398440184970,
+        'desc': '게이트 통과 시작점'
+    },
+    'gate_end': {
+        'lat': -33.72190811726158,
+        'lon': 150.67398512188350,
+        'desc': '게이트 통과 끝점'
+    },
+    'buoy_orbit': {
+        'lat': -33.72165457255059,
+        'lon': 150.67401729412393,
+        'desc': '부표선회 시작 지점'
+    },
+    'hopping': {
+        'lat': -33.72175726537696,
+        'lon': 150.67449697363470,
+        'desc': '호핑투어'
+    },
+    'obstacle_end_dock_start': {
+        'lat': -33.72256299430913,
+        'lon': 150.67453407868342,
+        'desc': '장애물 회피 끝 / 도킹 시작 (호핑투어 끝에서 여기까지 장애물 회피)'
+    },
+}
+
+# 미션 순서 (순차 실행)
+MISSION_SEQUENCE = [
+    'start',
+    'gate_start',
+    'gate_end',
+    'buoy_orbit',
+    'hopping',
+    'obstacle_end_dock_start',
+]
+
+
+def get_mission_waypoints_local():
+    """
+    미션 웨이포인트를 로컬 좌표(ENU)로 변환하여 반환
+    Returns: [(x, y, name, desc), ...]
+    """
+    waypoints = []
+    for name in MISSION_SEQUENCE:
+        wp = MISSION_WAYPOINTS_GPS[name]
+        utm_x, utm_y, _ = latlon_to_utm(wp['lat'], wp['lon'])
+        local_x = utm_x - REF_UTM_X
+        local_y = utm_y - REF_UTM_Y
+        waypoints.append((local_x, local_y, name, wp['desc']))
+    return waypoints
+
+
+def print_mission_waypoints():
+    """미션 웨이포인트 출력 (디버그용)"""
+    print("=== 미션 웨이포인트 (로컬 좌표) ===")
+    for x, y, name, desc in get_mission_waypoints_local():
+        print(f"  {name}: ({x:.1f}, {y:.1f}) - {desc}")

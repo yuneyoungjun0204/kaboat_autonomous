@@ -59,7 +59,7 @@ def cost_func_angle(x: float) -> float:
 
 def cost_func_distance(x: float) -> float:
     """거리에 대한 Cost 함수 (장애물에 가까울수록 높음)"""
-    return exp(-(x/30))
+    return exp(-(x/30) ** 2)
 
 
 def calculate_safe_zone(ld: List[float]) -> List[float]:

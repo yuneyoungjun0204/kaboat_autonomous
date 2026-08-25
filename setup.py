@@ -33,6 +33,9 @@ setup(
             'visualize_local = kaboat_autonomous.visualize_local:main',
             'visualize_global = kaboat_autonomous.visualize_global:main',
             'integrated_visualizer = kaboat_autonomous.integrated_visualizer:main',
+            'llm_interface = kaboat_autonomous.llm_interface:main',
+            'action_dispatcher = kaboat_autonomous.action_dispatcher:main',
+            'sensor_fusion = kaboat_autonomous.sensor_fusion:main',
         ],
     },
 )
