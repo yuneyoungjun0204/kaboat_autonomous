@@ -374,11 +374,11 @@ MISSION_SEQUENCE_PROMPT = """
    - 이미지 X좌표 → LiDAR 인덱스 변환
    - gate_pass 명령으로 중간점 통과
    - gate_end까지 navigate_direct
-3. **부표 선회** (카메라 필수)
+3. **부표 선회** (카메라 필수) - 녹색(GREEN) 부표
    - buoy_orbit 지점 도착
-   - dorodori로 지정 색상 부표 탐색
-   - 카메라에서 부표 위치 확인 → LiDAR 인덱스
-   - orbit 명령 (radius: 8m, direction: cw)
+   - dorodori로 녹색 부표 탐색
+   - 카메라에서 녹색 부표 위치 확인 → LiDAR 인덱스
+   - orbit 명령 (radius: 8m, direction: cw, 6 waypoints)
 4. **호핑투어**
    - hopping 지점으로 navigate_avoid
    - 도착 후 hover 3초 정지
@@ -393,8 +393,8 @@ MISSION_SEQUENCE_PROMPT = """
    - hover 3초로 정박 완료
 
 ### 카메라 사용 시점
-- 게이트 통과: 적/녹 부표 인식
-- 부표 선회: 지정 색상 부표 탐색
+- 게이트 통과: 적(좌)/녹(우) 부표 인식
+- 부표 선회: 녹색(GREEN) 부표 탐색
 - 도킹: 마커/도형 인식
 
 ### 이미지 X좌표 → LiDAR 인덱스 변환

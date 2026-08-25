@@ -20,7 +20,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from controllers.autonomous_module import Boat, pathplan, goal_passed, rotate, normalize_angle
 from controllers.maneuvers import (
-    align, backward, dorodori, hover, plan_orbit, midpoint_waypoint_from_scan
+    backward, dorodori, hover, plan_orbit, midpoint_waypoint_from_scan
 )
 
 try:
@@ -64,7 +64,7 @@ class MissionRunner(Node):
         self.mission_complete = False
 
         # 기동(Maneuver) 모드 - 'waypoint'(기본, pathplan 웨이포인트 추종)
-        # | 'align' | 'backward' | 'dorodori' | 'hover'
+        # | 'backward' | 'dorodori' | 'hover'
         # orbit/midpoint는 웨이포인트만 계산해서 'waypoint' 모드로 넘긴다
         # (장애물회피에서 이미 검증된 pathplan()의 추력 로직을 그대로 재사용).
         self.mode = 'waypoint'
@@ -112,8 +112,7 @@ class MissionRunner(Node):
         )
 
         # LLM 등 외부에서 기동 모듈을 트리거하는 JSON 명령
-        # 예: {"cmd": "align", "target_heading": 90, "duration": 10}
-        #     {"cmd": "hover"} {"cmd": "backward", "thrust": 150, "duration": 5}
+        # 예: {"cmd": "hover"} {"cmd": "backward", "thrust": 150, "duration": 5}
         #     {"cmd": "dorodori", "half_range_deg": 30, "duration": 20}
         #     {"cmd": "orbit", "idx": 45, "radius": 8, "direction": "ccw"}
         #     {"cmd": "midpoint", "idx1": 10, "idx2": 350}  {"cmd": "stop"}
@@ -227,13 +226,7 @@ class MissionRunner(Node):
 
         cmd = cmd_data.get('cmd')
         try:
-            if cmd == 'align':
-                self.start_align(
-                    target_heading=float(cmd_data['target_heading']),
-                    deadband=cmd_data.get('deadband'),
-                    duration=cmd_data.get('duration'),
-                )
-            elif cmd == 'backward':
+            if cmd == 'backward':
                 self.start_backward(
                     thrust=cmd_data.get('thrust'),
                     hold_heading=cmd_data.get('hold_heading'),
@@ -358,7 +351,7 @@ class MissionRunner(Node):
 
     # ============================================================
     # 기동(Maneuver) 모듈 - controllers/maneuvers.py 배선
-    # align/backward/dorodori/hover는 연속 제어 모드로 control_loop에서 매 tick
+    # backward/dorodori/hover는 연속 제어 모드로 control_loop에서 매 tick
     # 실행되고, orbit/midpoint는 웨이포인트만 계산해 'waypoint' 모드(이미
     # 검증된 pathplan() 회피 로직)로 넘긴다.
     # ============================================================
@@ -372,9 +365,7 @@ class MissionRunner(Node):
             self.stop_maneuver()
             return
 
-        if self.mode == 'align':
-            psi_error, tau_x = align(self.boat, p['target_heading'], p['deadband'])
-        elif self.mode == 'backward':
+        if self.mode == 'backward':
             psi_error, tau_x = backward(self.boat, thrust=p['thrust'], hold_heading=p['hold_heading'])
         elif self.mode == 'dorodori':
             psi_error, tau_x = dorodori(
@@ -390,20 +381,6 @@ class MissionRunner(Node):
         cmd = Float32MultiArray()
         cmd.data = [float(psi_error), float(tau_x), float(SETTINGS.MAX_THRUST), 0.0]
         self.cmd_pub.publish(cmd)
-
-    def start_align(self, target_heading: float,
-                     deadband: Optional[float] = None,
-                     duration: Optional[float] = None):
-        """제자리에서 target_heading(도)으로 회전 정렬 시작. 전진/후진 없음."""
-        self.mode = 'align'
-        self.maneuver_start_time = time.time()
-        self.maneuver_params = {
-            'target_heading': target_heading,
-            'deadband': deadband,
-            'duration': duration,
-        }
-        self.is_running = True
-        self.get_logger().info(f'[Maneuver] align started: {self.maneuver_params}')
 
     def start_backward(self, thrust: Optional[float] = None,
                         hold_heading: Optional[float] = None,
