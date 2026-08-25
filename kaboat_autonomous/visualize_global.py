@@ -143,38 +143,38 @@ def update(frame):
     ax.set_ylim(gps_position[1] - visual_size, gps_position[1] + visual_size)
     ax.set_aspect('equal')
 
-    # LiDAR 데이터를 Cartesian 좌표로 변환
+    # LiDAR 데이터를 Cartesian 좌표로 변환 (ENU: X=East, Y=North)
     angles = np.radians(np.arange(360))
-    x_positions = distances * np.sin(angles + np.radians(heading_angle)) + gps_position[0]
-    y_positions = distances * np.cos(angles + np.radians(heading_angle)) + gps_position[1]
+    x_positions = distances * np.cos(angles + np.radians(heading_angle)) + gps_position[0]
+    y_positions = distances * np.sin(angles + np.radians(heading_angle)) + gps_position[1]
 
     valid = distances > 0
     ax.scatter(x_positions[valid], y_positions[valid], color='blue', s=3, label='LiDAR')
 
-    # 불가능 영역 표시
+    # 불가능 영역 표시 (ENU 좌표계)
     if np.any(distances > 0):
         safe_zone = calculate_safe_zone(distances.tolist())
         for i, sz in enumerate(safe_zone):
             if sz == 0 and distances[i] > 0:
-                ux = distances[i] * np.sin(angles[i] + np.radians(heading_angle)) + gps_position[0]
-                uy = distances[i] * np.cos(angles[i] + np.radians(heading_angle)) + gps_position[1]
+                ux = distances[i] * np.cos(angles[i] + np.radians(heading_angle)) + gps_position[0]
+                uy = distances[i] * np.sin(angles[i] + np.radians(heading_angle)) + gps_position[1]
                 ax.scatter(ux, uy, color='red', s=10, alpha=0.5)
 
     # GPS 위치 (빨간 원)
     boat = Circle((gps_position[0], gps_position[1]), 1.5, color='red', fill=True, alpha=0.7)
     ax.add_patch(boat)
 
-    # 헤딩 방향 (초록색 선)
+    # 헤딩 방향 (초록색 선) - ENU: 0°=East, 90°=North
     line_length = 8
-    line_x = gps_position[0] + line_length * np.sin(np.radians(heading_angle))
-    line_y = gps_position[1] + line_length * np.cos(np.radians(heading_angle))
+    line_x = gps_position[0] + line_length * np.cos(np.radians(heading_angle))
+    line_y = gps_position[1] + line_length * np.sin(np.radians(heading_angle))
     ax.plot([gps_position[0], line_x], [gps_position[1], line_y],
             color='green', linewidth=3, label='Heading')
 
-    # 명령 방향 (파란색 점선)
+    # 명령 방향 (파란색 점선) - ENU 좌표계
     cmd_angle = heading_angle + psi_error
-    cmd_x = gps_position[0] + line_length * np.sin(np.radians(cmd_angle))
-    cmd_y = gps_position[1] + line_length * np.cos(np.radians(cmd_angle))
+    cmd_x = gps_position[0] + line_length * np.cos(np.radians(cmd_angle))
+    cmd_y = gps_position[1] + line_length * np.sin(np.radians(cmd_angle))
     ax.plot([gps_position[0], cmd_x], [gps_position[1], cmd_y],
             color='cyan', linewidth=2, linestyle='--', label='Command')
 
@@ -186,7 +186,7 @@ def update(frame):
         ax.plot([gps_position[0], waypoint[0]], [gps_position[1], waypoint[1]],
                 color='orange', linewidth=1, linestyle=':', alpha=0.7)
 
-    # Cost 시각화 (360도 방사형)
+    # Cost 시각화 (360도 방사형) - ENU 좌표계
     if np.any(distances > 0):
         cost_lines = []
         for i in range(-180, 180, 10):  # 10도 간격
@@ -197,8 +197,8 @@ def update(frame):
             # Cost가 낮을수록 선이 길어짐
             line_len = 5 / (cost + 0.5)
             angle_rad = np.radians(heading_angle + i)
-            cx = gps_position[0] + line_len * np.sin(angle_rad)
-            cy = gps_position[1] + line_len * np.cos(angle_rad)
+            cx = gps_position[0] + line_len * np.cos(angle_rad)
+            cy = gps_position[1] + line_len * np.sin(angle_rad)
             ax.plot([gps_position[0], cx], [gps_position[1], cy],
                     color='purple', linewidth=0.5, alpha=0.4)
 

@@ -67,6 +67,10 @@ class LocalMapVisualizer(Node):
             ranges = ranges[indices]
 
         ranges[ranges > threshold] = 0
+
+        # mission_runner.py와 동일한 90도 회전 보정 (VRX LiDAR 0도가 오른쪽 -> 전방)
+        ranges = np.roll(ranges, -90)
+
         distances = ranges
         angles = np.radians(np.arange(360))
 
@@ -108,12 +112,12 @@ def update(frame):
         if unsafe_angles:
             ax.scatter(unsafe_angles, unsafe_distances, color='red', s=5, alpha=0.3, label='Unsafe')
 
-    # 명령 각도 (초록색 선)
-    ax.plot([0, np.radians(psi_error)], [0, 12], color='green', linewidth=2, label=f'Cmd: {psi_error:.1f}°')
+    # 명령 각도 (초록색 선) - ENU(CCW+) → polar(CW+) 변환: 부호 반전
+    ax.plot([0, np.radians(-psi_error)], [0, 12], color='green', linewidth=2, label=f'Cmd: {psi_error:.1f}°')
 
-    # 웨이포인트 (있다면)
+    # 웨이포인트 (있다면) - ENU(CCW+) → polar(CW+) 변환
     if waypoint[0] != 0 or waypoint[1] != 0:
-        wp_angle = np.arctan2(waypoint[0], waypoint[1])
+        wp_angle = -np.arctan2(waypoint[1], waypoint[0])
         wp_dist = min(np.sqrt(waypoint[0]**2 + waypoint[1]**2), 14)
         ax.scatter([wp_angle], [wp_dist], color='red', s=100, marker='*', label='Waypoint')
 

@@ -40,6 +40,13 @@ def normalize_angle(angle: float) -> float:
     return (angle + 180) % 360 - 180
 
 
+# 실측 결과 heading 명령이 0이 아니라 90 근처를 기준으로 나와서 부호가 못
+# 바뀌는 현상 확인 - 근본 원인(자기반사/센서 프레임) 규명 전까지 임시로
+# 최종 명령에만 -90을 보정한다. 내부 회피 판단(goal_check, angle_danger 등)
+# 에는 적용하지 않고 pathplan/rotate의 반환값에만 적용할 것.
+HEADING_CMD_OFFSET_DEG = -90.0
+
+
 def cost_func_angle(x: float) -> float:
     """각도에 대한 Cost 함수 (목표 방향에서 벗어날수록 높음)"""
     return 1 - exp(-(x / 100) ** 2)
@@ -102,8 +109,14 @@ def calculate_optimal_psi_d(ld: List[float], safe_ld: List[float], goal_psi: int
     for i in range(-180, 180):
         idx = i % 360
         if safe_ld[idx] > 0:
+            # ld[idx] == 0 은 "이 방향엔 측정범위 내 장애물 없음"을 뜻한다
+            # (calculate_safe_zone과 동일 컨벤션). cost_func_distance(0)=1은
+            # 이를 최대 위험으로 잘못 해석해 자기반사가 있는 좁은 각도대로
+            # psi_error가 고정되는 원인이 되므로, 0은 "가장 먼 안전 거리"로
+            # 취급한다.
+            dist_for_cost = ld[idx] if ld[idx] > 0 else SETTINGS.LIDAR_MAX_RANGE
             cost = (SETTINGS.GAIN_PSI * cost_func_angle(i - goal_psi) +
-                    SETTINGS.GAIN_DISTANCE * cost_func_distance(ld[idx]))
+                    SETTINGS.GAIN_DISTANCE * cost_func_distance(dist_for_cost))
             theta_list.append([i, cost])
 
     return sorted(theta_list, key=lambda x: x[1])[0][0]
@@ -189,9 +202,16 @@ def pathplan(boat: Boat, goal_x: float, goal_y: float) -> Tuple[float, float]:
     dx = goal_x - boat.position[0]
     dy = goal_y - boat.position[1]
 
-    goal_psi = np.arctan2(dx, dy) * 180 / np.pi - boat.psi
+    # ENU 좌표계: arctan2(dy, dx) = 동쪽(X+)이 0°, 북쪽(Y+)이 90°
+    # IMU yaw도 ENU이므로 동일한 좌표계 사용
+    goal_heading = np.arctan2(dy, dx) * 180 / np.pi  # 목표 방향 (절대)
+    goal_psi = goal_heading - boat.psi  # 상대 각도
     goal_psi = normalize_angle(goal_psi)
     goal_distance = np.sqrt(dx ** 2 + dy ** 2)
+
+    # 디버그: LiDAR 데이터 확인
+    lidar_nonzero = sum(1 for x in boat.scan if x > 0)
+    front_dist = boat.scan[0] if len(boat.scan) > 0 else -1
 
     if len(boat.scan) == 0:
         return (0.0, 0.0)
@@ -200,22 +220,34 @@ def pathplan(boat: Boat, goal_x: float, goal_y: float) -> Tuple[float, float]:
     safe_ld = calculate_safe_zone(boat.scan)
     psi_error = calculate_optimal_psi_d(boat.scan, safe_ld, int(goal_psi))
 
-    # 추진력 계산 (10배 스케일)
-    if goal_check(boat, goal_distance, goal_psi):
+    # goal_check 결과 저장 (한 번만 호출)
+    is_clear = goal_check(boat, goal_distance, goal_psi)
+
+    # 디버그 출력
+    print(f'[pathplan] boat.psi={boat.psi:.1f}° goal_heading={goal_heading:.1f}° goal_psi={goal_psi:.1f}°')
+    print(f'[pathplan] lidar_nonzero={lidar_nonzero}/360 front={front_dist:.1f}m is_clear={is_clear}')
+    print(f'[pathplan] optimal_psi={psi_error}° (before override)')
+
+    # 추진력 계산 (VRX: 각속도 rad/s)
+    # MAX_THRUST의 70%를 최대로 사용 (30%는 조향용 여유)
+    max_forward = SETTINGS.MAX_THRUST * 0.7  # 조향 여유 확보
+    base_thrust = max_forward * 0.75  # 기본 추력
+
+    if is_clear:
         # 장애물 없음 - 목표 방향으로 직진
-        tau_x = 1500
+        tau_x = base_thrust
         psi_error = goal_psi
         if abs(psi_error) < 2:
-            tau_x = min((goal_distance ** 4) + 1000, SETTINGS.MAX_THRUST)
+            tau_x = min(max_forward * 0.5 + goal_distance * 2.0, max_forward)
     else:
         # 장애물 회피 모드
-        tx_dist_min = 300
-        tx_dist_max = 2000
+        tx_dist_min = max_forward * 0.15
+        tx_dist_max = max_forward
         dist_danger = 1.5
         dist_safe = 6
 
-        tx_angle_min = 500
-        tx_angle_max = 2000
+        tx_angle_min = max_forward * 0.25
+        tx_angle_max = max_forward
         angle_danger = 45
 
         dist = boat.scan[0] if boat.scan[0] > 0 else SETTINGS.LIDAR_MAX_RANGE
@@ -238,9 +270,12 @@ def pathplan(boat: Boat, goal_x: float, goal_y: float) -> Tuple[float, float]:
         if angle > angle_danger:
             tau_x = tx_angle
         else:
-            tau_x = tx_dist + tx_angle
+            tau_x = min(tx_dist + tx_angle, max_forward)
 
-        tau_x = min(tau_x, SETTINGS.MAX_THRUST)
+        tau_x = min(tau_x, max_forward)
+
+    # 임시 보정: 실측 heading 명령 기준점을 90 -> 0으로 이동
+    psi_error = normalize_angle(psi_error + HEADING_CMD_OFFSET_DEG)
 
     return (float(psi_error), float(tau_x))
 
@@ -257,4 +292,5 @@ def rotate(boat: Boat, psi_d: float) -> Tuple[float, float]:
         (psi_error, 0): 조향 오차, 추진력 0
     """
     psi_error = normalize_angle(psi_d - boat.psi)
+    psi_error = normalize_angle(psi_error + HEADING_CMD_OFFSET_DEG)
     return (float(psi_error), 0.0)

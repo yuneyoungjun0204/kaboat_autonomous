@@ -31,6 +31,7 @@ setup(
             'mission_runner = kaboat_autonomous.mission_runner:main',
             'visualize_local = kaboat_autonomous.visualize_local:main',
             'visualize_global = kaboat_autonomous.visualize_global:main',
+            'integrated_visualizer = kaboat_autonomous.integrated_visualizer:main',
         ],
     },
 )

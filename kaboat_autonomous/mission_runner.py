@@ -9,7 +9,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import NavSatFix, Imu, LaserScan
 from std_msgs.msg import Float32MultiArray, Float64
-from geometry_msgs.msg import Quaternion
+from geometry_msgs.msg import Quaternion, PointStamped
 import numpy as np
 import time
 from typing import List, Optional
@@ -48,10 +48,10 @@ class MissionRunner(Node):
         # 보트 상태
         self.boat = Boat()
 
-        # 기준점 (첫 GPS 수신 시 자동 설정)
-        self.ref_utm_x = None
-        self.ref_utm_y = None
-        self.ref_initialized = False
+        # 기준점 (SETTINGS와 동일한 고정 기준점 사용)
+        self.ref_utm_x = SETTINGS.REF_UTM_X
+        self.ref_utm_y = SETTINGS.REF_UTM_Y
+        self.ref_initialized = True  # 이미 초기화됨
 
         # 미션 상태
         self.waypoints: List[tuple] = []
@@ -83,6 +83,14 @@ class MissionRunner(Node):
             10
         )
 
+        # 클릭으로 웨이포인트 수신 (시각화에서)
+        self.create_subscription(
+            PointStamped,
+            '/waypoint_goal',
+            self.waypoint_goal_callback,
+            10
+        )
+
         # 제어 루프 타이머 (10Hz)
         self.timer = self.create_timer(0.1, self.control_loop)
 
@@ -94,16 +102,7 @@ class MissionRunner(Node):
         if msg.latitude != 0 and msg.longitude != 0:
             utm_x, utm_y, _ = SETTINGS.latlon_to_utm(msg.latitude, msg.longitude)
 
-            # 첫 GPS 수신 시 현재 위치를 기준점으로 설정
-            if not self.ref_initialized:
-                self.ref_utm_x = utm_x
-                self.ref_utm_y = utm_y
-                self.ref_initialized = True
-                self.get_logger().info(
-                    f'Reference point set: UTM ({utm_x:.2f}, {utm_y:.2f})'
-                )
-
-            # 기준점 기준 상대 좌표
+            # SETTINGS 기준점 기준 상대 좌표 (시각화와 동일한 좌표계)
             self.boat.position[0] = utm_x - self.ref_utm_x
             self.boat.position[1] = utm_y - self.ref_utm_y
 
@@ -124,7 +123,29 @@ class MissionRunner(Node):
         # 최대 거리 제한
         ranges[ranges > SETTINGS.LIDAR_MAX_RANGE] = 0
 
+        # 90° 회전 보정 (VRX LiDAR 0°가 오른쪽 → 전방으로)
+        ranges = np.roll(ranges, -90)
+
         self.boat.scan = ranges.tolist()
+
+    def waypoint_goal_callback(self, msg: PointStamped):
+        """시각화에서 클릭한 웨이포인트 수신"""
+        x, y = msg.point.x, msg.point.y
+        self.waypoints = [(x, y)]
+        self.current_waypoint_idx = 0
+        self.mission_complete = False
+        self.is_running = True
+
+        # 현재 보트 위치와 거리 계산
+        dx = x - self.boat.position[0]
+        dy = y - self.boat.position[1]
+        dist = (dx**2 + dy**2)**0.5
+
+        self.get_logger().info(f'=== WAYPOINT RECEIVED ===')
+        self.get_logger().info(f'  Target: ({x:.1f}, {y:.1f})')
+        self.get_logger().info(f'  Boat position: ({self.boat.position[0]:.1f}, {self.boat.position[1]:.1f})')
+        self.get_logger().info(f'  Distance: {dist:.1f}m')
+        self.get_logger().info(f'  is_running={self.is_running}, mission_complete={self.mission_complete}')
 
     def control_loop(self):
         """10Hz 제어 루프"""
@@ -150,10 +171,37 @@ class MissionRunner(Node):
         # 경로 계획
         psi_error, tau_x = pathplan(self.boat, goal_x, goal_y)
 
+        # 디버그 출력 (2초마다)
+        import time
+        if not hasattr(self, '_last_debug') or time.time() - self._last_debug > 2:
+            self._last_debug = time.time()
+            dx = goal_x - self.boat.position[0]
+            dy = goal_y - self.boat.position[1]
+            dist = (dx**2 + dy**2)**0.5
+            # 목표 방향 계산 (ENU: arctan2(dy, dx))
+            goal_heading = np.arctan2(dy, dx) * 180 / np.pi
+            heading_diff = goal_heading - self.boat.psi
+            # -180~180으로 정규화
+            heading_diff = (heading_diff + 180) % 360 - 180
+            self.get_logger().info(
+                f'=== DEBUG ===\n'
+                f'  Boat: pos=({self.boat.position[0]:.1f}, {self.boat.position[1]:.1f}) psi={self.boat.psi:.1f}°\n'
+                f'  Goal: ({goal_x:.1f}, {goal_y:.1f}) dist={dist:.1f}m\n'
+                f'  Direction: goal_heading={goal_heading:.1f}° diff={heading_diff:.1f}°\n'
+                f'  Command: psi_error={psi_error:.1f}° tau_x={tau_x:.1f}'
+            )
+
         # 명령 발행
         cmd = Float32MultiArray()
         cmd.data = [float(psi_error), float(tau_x), float(SETTINGS.MAX_THRUST)]
         self.cmd_pub.publish(cmd)
+
+        # 디버그: 1초마다 명령 발행 확인
+        if not hasattr(self, '_last_cmd_log') or time.time() - self._last_cmd_log > 1:
+            self._last_cmd_log = time.time()
+            self.get_logger().info(
+                f'/command published: psi_err={psi_error:.1f}, tau_x={tau_x:.1f}, max={SETTINGS.MAX_THRUST}'
+            )
 
         # 웨이포인트 시각화용
         wp = Float32MultiArray()
@@ -208,16 +256,9 @@ def main(args=None):
     rclpy.init(args=args)
     node = MissionRunner()
 
-    # 테스트 웨이포인트 (시뮬레이터용 상대 좌표)
-    test_waypoints = [
-        (10.0, 0.0),   # 전방 10m
-        (10.0, 10.0),  # 우측 10m
-        (0.0, 10.0),   # 후방 10m
-        (0.0, 0.0),    # 시작점
-    ]
-
-    node.set_waypoints(test_waypoints)
-    node.start()
+    # 자동 시작 없음 - 시각화에서 클릭으로 웨이포인트 설정 대기
+    # is_running = False 상태로 대기
+    node.get_logger().info('Waiting for waypoint from visualizer (click on Global Map)')
 
     try:
         rclpy.spin(node)

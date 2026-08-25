@@ -86,11 +86,13 @@ class MotorController(Node):
         max_sat = msg.data[2] if len(msg.data) > 2 else SETTINGS.MAX_THRUST
 
         # PD 제어로 회전 토크 계산
+        # psi_error > 0: 반시계방향(왼쪽) 회전 필요 → 오른쪽 추력 증가
         tau_n = self.pd_control(psi_error)
 
         # 차동 추진 계산 (WAM-V: 좌/우 스러스터)
-        thrust_left = tau_x + tau_n * 0.5
-        thrust_right = tau_x - tau_n * 0.5
+        # 반시계방향 회전: right > left
+        thrust_left = tau_x - tau_n * 0.5
+        thrust_right = tau_x + tau_n * 0.5
 
         # 정지 상태
         if psi_error == 0 and tau_x == 0:
@@ -100,6 +102,16 @@ class MotorController(Node):
             # Saturation
             thrust_left = max(-max_sat, min(max_sat, thrust_left))
             thrust_right = max(-max_sat, min(max_sat, thrust_right))
+
+        # 디버그: 포화 전 값 확인
+        raw_left = tau_x - tau_n * 0.5
+        raw_right = tau_x + tau_n * 0.5
+        if not hasattr(self, '_last_motor_log') or (self.get_clock().now().nanoseconds - self._last_motor_log) > 1e9:
+            self._last_motor_log = self.get_clock().now().nanoseconds
+            self.get_logger().info(
+                f'Motor: psi_err={psi_error:.1f}° tau_x={tau_x:.0f} tau_n={tau_n:.0f} | '
+                f'raw=[{raw_left:.0f}, {raw_right:.0f}] → sat=[{thrust_left:.0f}, {thrust_right:.0f}]'
+            )
 
         # Publish
         msg_left = Float64()
