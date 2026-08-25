@@ -11,7 +11,7 @@ from launch.actions import ExecuteProcess, TimerAction
 GZ_IP = '10.22.79.185'
 
 def generate_launch_description():
-    # 센서 브릿지 (GZ → ROS) - GZ_IP 환경변수 포함
+    # 센서 브릿지 (GZ → ROS) - GPS/IMU/LiDAR
     sensor_bridge = ExecuteProcess(
         cmd=['bash', '-c', f'''
             export GZ_IP={GZ_IP}
@@ -20,14 +20,26 @@ def generate_launch_description():
                 /world/kaboat_course/model/wamv/link/wamv/gps_wamv_link/sensor/navsat/navsat@sensor_msgs/msg/NavSatFix[gz.msgs.NavSat \
                 /world/kaboat_course/model/wamv/link/wamv/imu_wamv_link/sensor/imu_wamv_sensor/imu@sensor_msgs/msg/Imu[gz.msgs.IMU \
                 /world/kaboat_course/model/wamv/link/wamv/base_link/sensor/lidar_wamv_sensor/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan \
-                /world/kaboat_course/model/wamv/link/wamv/base_link/sensor/front_left_camera_sensor/image@sensor_msgs/msg/Image[gz.msgs.Image \
                 --ros-args \
                 -r /world/kaboat_course/model/wamv/link/wamv/gps_wamv_link/sensor/navsat/navsat:=/wamv/sensors/gps/fix \
                 -r /world/kaboat_course/model/wamv/link/wamv/imu_wamv_link/sensor/imu_wamv_sensor/imu:=/wamv/sensors/imu/data \
-                -r /world/kaboat_course/model/wamv/link/wamv/base_link/sensor/lidar_wamv_sensor/scan:=/wamv/sensors/lidar/scan \
-                -r /world/kaboat_course/model/wamv/link/wamv/base_link/sensor/front_left_camera_sensor/image:=/wamv/sensors/camera/image_raw
+                -r /world/kaboat_course/model/wamv/link/wamv/base_link/sensor/lidar_wamv_sensor/scan:=/wamv/sensors/lidar/scan
         '''],
         name='sensor_bridge',
+        output='screen'
+    )
+
+    # 카메라 브릿지 (별도 실행 - QoS 이슈 회피)
+    # ros_gz_image 사용으로 이미지 전송 안정화
+    camera_bridge = ExecuteProcess(
+        cmd=['bash', '-c', f'''
+            export GZ_IP={GZ_IP}
+            ros2 run ros_gz_image image_bridge \
+                /world/kaboat_course/model/wamv/link/wamv/base_link/sensor/front_left_camera_sensor/image \
+                --ros-args \
+                -r /world/kaboat_course/model/wamv/link/wamv/base_link/sensor/front_left_camera_sensor/image:=/wamv/sensors/camera/image_raw
+        '''],
+        name='camera_bridge',
         output='screen'
     )
 
@@ -109,6 +121,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         sensor_bridge,
+        camera_bridge,
         thruster_bridge,
         motor_controller,
         mission_runner,
