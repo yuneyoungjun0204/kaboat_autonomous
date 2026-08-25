@@ -108,8 +108,13 @@ class IntegratedVisualizer(Node):
         if len(ranges) != 360:
             indices = np.linspace(0, len(ranges) - 1, 360).astype(int)
             ranges = ranges[indices]
-        # 90° 회전 보정 (VRX LiDAR 0°가 오른쪽 → 전방으로)
-        ranges = np.roll(ranges, -90)
+        # 자기반사 필터: LiDAR 마운트 포스트가 뱃머리 기준 약 -137°~-44°
+        # 구간에서 0.35~0.5m로 계속 잡힘. mission_runner.py와 동일하게 필터링.
+        ranges[(ranges > 0) & (ranges < SETTINGS.MIN_VALID_RANGE)] = 0
+        # 180도 회전 보정 (mission_runner.py와 동일 - 실측으로 확인됨:
+        # raw index 0(=-180°, 정후방)이 자기반사 중심이라 정면은 배열
+        # 정중앙에 있음. 기존 -90 롤은 틀린 값이었음)
+        ranges = np.roll(ranges, 180)
         self.lidar_distances = ranges
         self.lidar_distances[self.lidar_distances > SETTINGS.LIDAR_MAX_RANGE] = 0
 
@@ -233,7 +238,7 @@ class VisualizerApp:
         self.ax_local.set_title('Local Map (LiDAR & Commands)')
         self.ax_local.set_theta_zero_location('N')
         self.ax_local.set_theta_direction(-1)
-        self.ax_local.set_ylim(0, 15)
+        self.ax_local.set_ylim(0, 37.5)
 
         # LiDAR 데이터 (polar) - Cmd/Waypoint와 동일하게 ENU(CCW+) -> polar(CW+) 부호 반전.
         # angles는 뱃머리 기준 CCW+ (pathplan의 atan2(dy,dx)와 동일 컨벤션)인데
@@ -251,18 +256,18 @@ class VisualizerApp:
             self.ax_local.fill(-theta, safe_zone, color='blue', alpha=0.1)
 
         # 현재 헤딩 (0도 = 전방)
-        self.ax_local.plot([0, 0], [0, 12], 'g-', linewidth=3, label='Forward')
+        self.ax_local.plot([0, 0], [0, 30], 'g-', linewidth=3, label='Forward')
 
         # 명령 방향 (psi_error) - ENU(CCW+) → polar(CW+) 변환: 부호 반전
         psi_rad = np.radians(-self.node.psi_error)
-        self.ax_local.plot([0, psi_rad], [0, 10], 'r-', linewidth=2, label=f'Cmd: {self.node.psi_error:.1f}°')
+        self.ax_local.plot([0, psi_rad], [0, 25], 'r-', linewidth=2, label=f'Cmd: {self.node.psi_error:.1f}°')
 
         # 웨이포인트 방향 (로컬 좌표계) - ENU(CCW+) → polar(CW+) 변환
         if self.node.waypoint:
             dx = self.node.waypoint[0] - pos[0]
             dy = self.node.waypoint[1] - pos[1]
             wp_angle = -(np.arctan2(dy, dx) - heading_rad)  # 부호 반전
-            wp_dist = min(np.sqrt(dx**2 + dy**2), 12)
+            wp_dist = min(np.sqrt(dx**2 + dy**2), 30)
             self.ax_local.scatter([wp_angle], [wp_dist], c='red', s=100, marker='*', label='Waypoint')
 
         # 스러스터 상태 표시

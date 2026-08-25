@@ -40,11 +40,16 @@ def normalize_angle(angle: float) -> float:
     return (angle + 180) % 360 - 180
 
 
-# 실측 결과 heading 명령이 0이 아니라 90 근처를 기준으로 나와서 부호가 못
-# 바뀌는 현상 확인 - 근본 원인(자기반사/센서 프레임) 규명 전까지 임시로
-# 최종 명령에만 -90을 보정한다. 내부 회피 판단(goal_check, angle_danger 등)
-# 에는 적용하지 않고 pathplan/rotate의 반환값에만 적용할 것.
-HEADING_CMD_OFFSET_DEG = -90.0
+# 실측(2026-08-25) 검증: HEADING_CMD_OFFSET_DEG=-90을 적용한 상태로 20초간
+# 라이브 텔레메트리를 보니 psi_error는 0으로 "수렴"했다고 나오는데, 실제
+# boat.psi - goal_heading(atan2(dy,dx))의 차이는 -90도에 고정되고 목표까지
+# 거리(goal_dist)는 전혀 줄지 않았음(44.3~45m로 20초간 정체). 즉 보정이
+# 반대 방향으로 90도를 더 어긋나게 만들고 있었음이 확인됨.
+# 애초에 "90도 근처 고정" 증상의 진짜 원인은 cost_func_distance(0)이 "장애물
+# 없음(0)"을 최대 위험으로 잘못 해석해 자기반사 섹터로 psi_error가 고정되던
+# 버그였고(위 dist_for_cost 처리로 수정됨), 그 증상을 보고 만든 이 -90 보정은
+# 잘못된 패치였다. 근본 원인이 이미 해소됐으므로 오프셋은 0으로 되돌린다.
+HEADING_CMD_OFFSET_DEG = 0.0
 
 
 def cost_func_angle(x: float) -> float:

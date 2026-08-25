@@ -115,6 +115,27 @@ class MissionRunner(Node):
         ranges = np.array(msg.ranges)
         ranges = np.nan_to_num(ranges, nan=0.0, posinf=0.0)
 
+        # 디버그: RAW(전처리 전) 각도 정의 및 최단거리 반사의 raw 인덱스/각도 확인
+        import time as _time
+        if not hasattr(self, '_last_raw_debug') or _time.time() - self._last_raw_debug > 2:
+            self._last_raw_debug = _time.time()
+            valid_mask = (ranges > 0) & (ranges < SETTINGS.LIDAR_MAX_RANGE)
+            if np.any(valid_mask):
+                idxs = np.where(valid_mask)[0]
+                dists = ranges[idxs]
+                order = np.argsort(dists)[:5]
+                lines = []
+                for k in order:
+                    ri = idxs[k]
+                    ang_deg = np.degrees(msg.angle_min + ri * msg.angle_increment)
+                    lines.append(f"raw_idx={ri} raw_angle={ang_deg:.1f} dist={dists[k]:.2f}")
+                self.get_logger().info(
+                    f'[RAWLIDAR] angle_min={np.degrees(msg.angle_min):.1f} '
+                    f'angle_max={np.degrees(msg.angle_max):.1f} '
+                    f'increment={np.degrees(msg.angle_increment):.4f} n={len(msg.ranges)} '
+                    f'boat.psi={self.boat.psi:.1f} | ' + ' | '.join(lines)
+                )
+
         # 360도로 리샘플링
         if len(ranges) != 360:
             indices = np.linspace(0, len(ranges) - 1, 360).astype(int)
@@ -123,8 +144,18 @@ class MissionRunner(Node):
         # 최대 거리 제한
         ranges[ranges > SETTINGS.LIDAR_MAX_RANGE] = 0
 
-        # 90° 회전 보정 (VRX LiDAR 0°가 오른쪽 → 전방으로)
-        ranges = np.roll(ranges, -90)
+        # 자기반사 필터: 실측 결과 LiDAR 마운트 포스트가 뱃머리 기준 약
+        # -137°~-44°(94도 연속) 구간에서 0.35~0.5m로 계속 잡힘. 실제 위험
+        # 판정 임계값(dist_danger=1.5m)보다 충분히 낮은 MIN_VALID_RANGE
+        # 미만은 자기 구조물로 보고 "장애물 없음(0)"으로 처리한다.
+        ranges[(ranges > 0) & (ranges < SETTINGS.MIN_VALID_RANGE)] = 0
+
+        # 180도 회전 보정: raw LaserScan은 angle_min=-180°부터 시작하고,
+        # 실측 결과 자기반사(마운트 포스트)가 정확히 이 raw index 0(=-180°,
+        # 정후방) 부근에서 잡힘 -> 정면(0°)은 raw 배열의 정중앙(360 리샘플
+        # 기준 index≈180)에 있다는 뜻. index 0이 정면이 되려면 180도 롤 필요.
+        # (기존 -90 롤은 잘못된 값이었음 - 실측으로 확인 후 수정)
+        ranges = np.roll(ranges, 180)
 
         self.boat.scan = ranges.tolist()
 

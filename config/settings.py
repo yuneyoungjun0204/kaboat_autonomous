@@ -70,6 +70,7 @@ MAX_THRUST = 500.0     # 최대 각속도 (rad/s) - 기본 전진 500rpm
 # 센서 설정
 LIDAR_MAX_RANGE = 50.0  # LiDAR 최대 감지 거리 (m)
 LIDAR_ANGLES = 360      # LiDAR 각도 분해능
+MIN_VALID_RANGE = 1.0   # 이 미만은 LiDAR 마운트 자기반사로 간주해 무시 (m)
 
 # ROS2 토픽 이름 (VRX)
 TOPICS = {

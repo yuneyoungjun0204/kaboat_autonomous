@@ -68,8 +68,9 @@ class LocalMapVisualizer(Node):
 
         ranges[ranges > threshold] = 0
 
-        # mission_runner.py와 동일한 90도 회전 보정 (VRX LiDAR 0도가 오른쪽 -> 전방)
-        ranges = np.roll(ranges, -90)
+        # mission_runner.py와 동일한 180도 회전 보정 (실측 확인: 자기반사가
+        # raw index 0=-180°(정후방) 중심이라 정면은 배열 정중앙에 위치)
+        ranges = np.roll(ranges, 180)
 
         distances = ranges
         angles = np.radians(np.arange(360))
@@ -91,7 +92,7 @@ def update(frame):
 
     ax.clear()
     ax.set_title('LiDAR Local Map (Polar)', va='bottom')
-    ax.set_ylim(0, 15)
+    ax.set_ylim(0, 37.5)
 
     ax.set_theta_zero_location("N")
     ax.set_theta_direction(-1)
@@ -113,12 +114,12 @@ def update(frame):
             ax.scatter(unsafe_angles, unsafe_distances, color='red', s=5, alpha=0.3, label='Unsafe')
 
     # 명령 각도 (초록색 선) - ENU(CCW+) → polar(CW+) 변환: 부호 반전
-    ax.plot([0, np.radians(-psi_error)], [0, 12], color='green', linewidth=2, label=f'Cmd: {psi_error:.1f}°')
+    ax.plot([0, np.radians(-psi_error)], [0, 30], color='green', linewidth=2, label=f'Cmd: {psi_error:.1f}°')
 
     # 웨이포인트 (있다면) - ENU(CCW+) → polar(CW+) 변환
     if waypoint[0] != 0 or waypoint[1] != 0:
         wp_angle = -np.arctan2(waypoint[1], waypoint[0])
-        wp_dist = min(np.sqrt(waypoint[0]**2 + waypoint[1]**2), 14)
+        wp_dist = min(np.sqrt(waypoint[0]**2 + waypoint[1]**2), 35)
         ax.scatter([wp_angle], [wp_dist], color='red', s=100, marker='*', label='Waypoint')
 
     ax.grid(True)
