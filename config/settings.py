@@ -104,6 +104,8 @@ TARGET_BUOY_COLOR = 'green'      # 선회 대상 부표 (green/red/blue)
 LIDAR_MAX_RANGE = 50.0  # LiDAR 최대 감지 거리 (m)
 LIDAR_ANGLES = 360      # LiDAR 각도 분해능
 MIN_VALID_RANGE = 1.0   # 이 미만은 LiDAR 마운트 자기반사로 간주해 무시 (m)
+LIDAR_SMOOTHING_ENABLED = True   # LiDAR 지수 평균 스무딩
+LIDAR_SMOOTHING_DECAY = 0.95     # 스무딩 감쇠율 (높을수록 넓게 평균)
 
 # ROS2 토픽 이름 (VRX)
 TOPICS = {

@@ -286,10 +286,12 @@ def pathplan(boat: Boat, goal_x: float, goal_y: float) -> Tuple[float, float]:
     goal_psi = normalize_angle(goal_psi)
     goal_distance = np.sqrt(dx ** 2 + dy ** 2)
 
-    # LiDAR 지수 평균 스무딩 (주변 장애물 영향 반영)
-    # window=3: i-3 ~ i+3 범위 참조
-    # decay=0.6: 한 칸 멀어질 때마다 가중치 ~55% 감소
-    smoothed_scan = smooth_lidar_exponential(boat.scan, window=3, decay=0.6)
+    # LiDAR 지수 평균 스무딩 (주변 장애물 영향 반영, 설정으로 토글 가능)
+    if SETTINGS.LIDAR_SMOOTHING_ENABLED:
+        # window=3: i-3 ~ i+3 범위 참조
+        smoothed_scan = smooth_lidar_exponential(boat.scan, window=3, decay=SETTINGS.LIDAR_SMOOTHING_DECAY)
+    else:
+        smoothed_scan = boat.scan
 
     # 디버그: LiDAR 데이터 확인
     lidar_nonzero = sum(1 for x in boat.scan if x > 0)
