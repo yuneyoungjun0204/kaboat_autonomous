@@ -6,7 +6,18 @@ LLM에게 제공할 시스템 프롬프트와 상황 컨텍스트를 생성합�
 멀티모달 입력(카메라 이미지 + LiDAR 데이터 + 텍스트)과 함께 사용됩니다.
 """
 
-SYSTEM_PROMPT = """# KABOAT 자율주행 미션 수행 시스템
+# 미션별 카메라(색상/마커 인식) 필요 여부 - VISION_GUIDE 포함 여부 결정
+MISSION_NEEDS_CAMERA = {
+    'gate_search': True,
+    'buoy_orbit': True,
+    'hopping_tour': False,
+    'obstacle_course': False,
+    'docking': True,
+}
+
+# 항상 포함되는 핵심 프롬프트: 모듈 스키마 + LiDAR 규약 + 응답 형식만.
+# 미션별 수행 전략은 generate_mission_context()가 담당하므로 여기서 중복 나열하지 않는다.
+CORE_PROMPT = """# KABOAT 자율주행 미션 수행 시스템
 
 당신은 KABOAT 자율주행 보트의 미션 컨트롤러입니다.
 센서 데이터를 분석하고, 적절한 모듈을 호출하여 미션을 수행합니다.
@@ -27,14 +38,14 @@ SYSTEM_PROMPT = """# KABOAT 자율주행 미션 수행 시스템
 // 후진 (stuck 탈출, 헤딩 유지)
 {"action": "backward", "duration": 3.0}
 
-// 좌우 스캔 (게이트/부표 탐색)
+// 헤딩 정렬 (특정 방향으로 정렬, 전진 없음) - 탐색 시 dorodori보다 우선 사용
+{"action": "align", "heading": 90.0, "tolerance": 5.0, "timeout": 10.0}
+
+// 좌우 스캔 (align으로 정렬할 클러스터가 없을 때의 광역 탐색 폴백)
 {"action": "dorodori", "center_heading": 45.0, "duration": 8.0, "half_range": 30.0}
 
 // 위치 유지 (도킹, 호핑투어 정지)
 {"action": "hover", "x": 5.0, "y": 5.0, "duration": 3.0}
-
-// 헤딩 정렬 (특정 방향으로 정렬, 전진 없음)
-{"action": "align", "heading": 90.0, "tolerance": 5.0, "timeout": 10.0}
 ```
 
 ### 웨이포인트 생성 모듈
@@ -65,58 +76,33 @@ SYSTEM_PROMPT = """# KABOAT 자율주행 미션 수행 시스템
 - 270° = 우현 (starboard, 오른쪽)
 - 양수 = 반시계방향 (CCW)
 
-## 색상-부표 규약 (본 코스 실측 기준, IALA와 반대)
-- **녹색(Green)**: 좌현 통과 (왼쪽에 두고 지나감)
-- **적색(Red)**: 우현 통과 (오른쪽에 두고 지나감)
-- 게이트: 녹색-적색 사이로 진입
-- (주의: 일반 IALA 규약은 적=좌현/녹=우현이지만, 이 시뮬레이션 코스는 실제 카메라 확인 결과 반대로 배치되어 있음 - 2026-08-26 gate_start 지점에서 확인)
+## 탐색 우선순위: align 먼저, dorodori는 폴백
 
-## 미션 수행 전략
+`lidar_summary.clusters`에 물체 클러스터 후보가 이미 들어있다 (부표 무리,
+도킹 스테이션 등 인접 반사점을 각도로 묶은 결과). 매 스캔마다 자동 계산되므로
+별도 액션 호출 없이 바로 확인 가능:
+`[{"center_angle": 42.5, "distance": 10.0, "width_deg": 5.0, "point_count": 6}, ...]`
+(가까운 순 정렬, 최대 3개)
 
-### 1. 게이트 통과 (Gate Navigation)
-1. `dorodori`로 시야 스캔하며 적색/녹색 부표 탐색
-2. 이미지에서 적색/녹색 부표 위치 확인
-3. 해당 방향의 LiDAR 인덱스 추정 (이미지 위치 → 각도)
-4. `gate_pass`로 중간점 웨이포인트 생성
-5. `navigate_direct`로 통과
+탐색이 필요할 때:
+1. `clusters`가 비어있지 않으면 → 가장 가까운(첫 번째) 클러스터를 목표로
+   `align` 실행. `heading = 현재 헤딩(IMU) + cluster.center_angle` (정규화, -180~180)
+2. 정렬 완료 후 카메라로 실제 부표/도킹 마커인지 확인
+   - 맞으면 해당 미션 절차 진행
+   - 아니면 다음 순위 클러스터로 재시도, 그래도 없으면 3번
+3. `clusters`가 비어있거나 후보가 모두 아니면 → `dorodori`로 광역 스캔
+   (dorodori는 클러스터 없을 때만 쓰는 폴백. clusters가 있는데 바로
+   dorodori부터 쓰지 말 것 - 이미 방향을 아는데 광역 스윕은 비효율적)
 
-### 2. 부표 선회 (Buoy Circumnavigation)
-1. 지정된 색상의 부표 탐색 (이미지 분석)
-2. 부표 방향의 LiDAR 인덱스 확인
-3. `orbit`으로 궤도 웨이포인트 생성
-4. 자동으로 순차 추종
-
-### 3. 호핑투어 (Waypoint Navigation)
-1. GPS 웨이포인트 리스트 수신
-2. `waypoints` 액션으로 설정
-3. 각 지점에서 `hover` 3초
-
-### 4. 장애물 회피 항법 (Obstacle Avoidance)
-1. `navigate_avoid`로 목적지 설정
-2. 자동으로 LiDAR 기반 경로 계획
-
-### 5. 도킹 (Docking)
-1. `dorodori`로 도킹 스테이션 탐색
-2. 마커/색상으로 도킹 베이 식별
-3. `gate_pass` 또는 직접 좌표로 진입점 계산
-4. `navigate_direct`로 접근 (저속)
-5. `hover` 3초로 정박 완료
-
-## 상황 판단 가이드라인
-
-### 이미지 분석 시
-- 적색/녹색/파란색 부표 위치를 화면 좌표로 파악
-- 화면 중앙 = 정면(0°), 왼쪽 = 좌현(+), 오른쪽 = 우현(-)
-- 화면 X 좌표를 LiDAR 각도로 변환: angle ≈ (center_x - x) / center_x * 60°
-
-### LiDAR 데이터 분석 시
+## LiDAR 데이터 분석 시
 - `front_clear: true` → 전방 10m 이내 장애물 없음
 - `gate_detected: true` → 좌우에 대칭적 물체 (게이트 가능성)
 - `closest_obstacle` → 가장 가까운 장애물 방향/거리
+- `clusters` → 위 "탐색 우선순위" 참고
 
-### Stuck 감지 시
+## Stuck 감지 시
 1. `backward` 3초 후진
-2. `dorodori`로 새 경로 탐색
+2. `clusters` 확인 후 있으면 `align`, 없으면 `dorodori`로 새 경로 탐색
 3. 다른 방향으로 `navigate_avoid`
 
 ## 응답 형식
@@ -131,6 +117,21 @@ SYSTEM_PROMPT = """# KABOAT 자율주행 미션 수행 시스템
 ```
 """
 
+# 카메라(색상/마커 인식)가 필요한 미션에만 포함하는 조각.
+# gate_search/buoy_orbit/docking 전용, hopping_tour/obstacle_course에는 불필요.
+VISION_GUIDE = """## 색상-부표 규약 (본 코스 실측 기준, IALA와 반대)
+- **녹색(Green)**: 좌현 통과 (왼쪽에 두고 지나감)
+- **적색(Red)**: 우현 통과 (오른쪽에 두고 지나감)
+- 게이트: 녹색-적색 사이로 진입
+- (주의: 일반 IALA 규약은 적=좌현/녹=우현이지만, 이 시뮬레이션 코스는 실제 카메라 확인 결과 반대로 배치되어 있음 - 2026-08-26 gate_start 지점에서 확인)
+
+## 이미지 분석 시
+- 적색/녹색/파란색 부표 위치를 화면 좌표로 파악
+- 화면 중앙 = 정면(0°), 왼쪽 = 좌현(+), 오른쪽 = 우현(-)
+- 화면 X 좌표를 LiDAR 각도로 변환: `lidar_angle = (320 - image_x) / 320 * 60`
+  - 예: x=160 (왼쪽 1/4) → +30° / x=480 (오른쪽 1/4) → -30° (idx=330)
+"""
+
 
 def generate_mission_context(mission_type: str, params: dict = None) -> str:
     """미션별 추가 컨텍스트 생성"""
@@ -143,7 +144,7 @@ def generate_mission_context(mission_type: str, params: dict = None) -> str:
 
 단계:
 1. 현재 이미지에서 적색/녹색 부표가 보이는지 확인
-2. 보이지 않으면 `dorodori`로 탐색
+2. 안 보이면 `clusters` 확인 → 있으면 가장 가까운 클러스터로 `align` (없으면 `dorodori`)
 3. 보이면 각 부표의 화면 위치에서 LiDAR 인덱스 추정
 4. `gate_pass`로 중간점 계산 후 통과
 
@@ -159,12 +160,12 @@ def generate_mission_context(mission_type: str, params: dict = None) -> str:
 
 단계:
 1. 이미지에서 {color} 원형 부표 탐색
-2. 부표 방향의 LiDAR 인덱스 확인
-3. `orbit`으로 궤도 설정 (radius: 8m, direction: {direction})
-4. 완료까지 대기
+2. 안 보이면 `clusters` 확인 → 있으면 가장 가까운 클러스터로 `align` (없으면 `dorodori`)
+3. 부표 방향의 LiDAR 인덱스 확인
+4. `orbit`으로 궤도 설정 (radius: 8m, direction: {direction})
+5. 완료까지 대기
 
 힌트:
-- 부표가 안 보이면 `dorodori`로 탐색
 - 여러 색상이 보이면 지정된 {color}만 선택
 """,
 
@@ -197,7 +198,7 @@ def generate_mission_context(mission_type: str, params: dict = None) -> str:
 
 힌트:
 - `lidar_summary`에서 장애물 상황 확인
-- stuck 감지 시 `backward` → `dorodori` → 재시도
+- stuck 감지 시 `backward` → `align`(clusters 있으면)/`dorodori` → 재시도
 """,
 
         'docking': """
@@ -206,7 +207,7 @@ def generate_mission_context(mission_type: str, params: dict = None) -> str:
 목표: {color} 마커가 있는 도킹 스테이션에 진입하여 3초 정박하세요.
 
 단계:
-1. `dorodori`로 도킹 스테이션 탐색
+1. `clusters` 확인 → 있으면 가장 가까운 클러스터로 `align` (없으면 `dorodori`)로 도킹 스테이션 탐색
 2. {color} 마커/도형 식별
 3. 도킹 베이 입구의 두 점 파악 → `gate_pass` 또는 좌표 직접 계산
 4. `navigate_direct`로 저속 접근
@@ -226,12 +227,24 @@ def generate_mission_context(mission_type: str, params: dict = None) -> str:
 
 
 def generate_full_prompt(mission_type: str, params: dict = None,
-                         include_waypoints: bool = True) -> str:
-    """전체 프롬프트 생성 (시스템 + 미션 웨이포인트 + 미션 컨텍스트)"""
-    parts = [SYSTEM_PROMPT]
+                         include_waypoints: bool = True,
+                         include_sequence: bool = False) -> str:
+    """
+    미션 실행용 프롬프트 생성 (core + 카메라 필요 시 vision guide + 웨이포인트 + 미션 컨텍스트).
+
+    include_sequence: 전체 6단계 미션 개요(MISSION_SEQUENCE_PROMPT)를 포함할지 여부.
+    개별 미션 수행 중엔 불필요한 다른 미션 정보라 기본 False - 미션 감독/전체 계획
+    수립처럼 전체 그림이 필요한 호출에서만 True로 켤 것 (토큰 절약).
+    """
+    parts = [CORE_PROMPT]
+
+    if MISSION_NEEDS_CAMERA.get(mission_type, True):
+        parts.append(VISION_GUIDE)
 
     if include_waypoints:
         parts.append(get_mission_waypoints_text())
+
+    if include_sequence:
         parts.append(MISSION_SEQUENCE_PROMPT)
 
     context = generate_mission_context(mission_type, params)
@@ -255,6 +268,7 @@ def format_status_for_llm(status: dict, lidar_summary: dict) -> str:
 전방 클리어: {lidar_summary.get('front_clear', 'unknown')}
 게이트 감지: {lidar_summary.get('gate_detected', False)}
 가장 가까운 장애물: {lidar_summary.get('closest_obstacle', {})}
+클러스터: {lidar_summary.get('clusters', [])}
 
 ## 현재 액션
 
@@ -292,6 +306,7 @@ def format_sensor_data_for_llm(gps: dict, imu: dict, lidar_summary: dict,
 - 게이트 감지: {lidar_summary.get('gate_detected', False)}
 - 가장 가까운 장애물: {lidar_summary.get('closest_obstacle', {}).get('distance', 999):.1f}m @ {lidar_summary.get('closest_obstacle', {}).get('angle', 0)}°
 - 장애물 개수: {lidar_summary.get('obstacle_count', 0)}개
+- 클러스터(탐색 후보, 가까운 순): {lidar_summary.get('clusters', [])}
 
 ### 현재 상태
 - 액션: {action_status.get('current_action', 'none')}
@@ -367,20 +382,20 @@ def get_mission_waypoints_text():
         return f"(웨이포인트 로드 실패: {e})"
 
 
+# 전체 미션 개요 (include_sequence=True일 때만 포함 - 감독/전체 계획용, 기본 미사용)
 MISSION_SEQUENCE_PROMPT = """
 ## 전체 미션 시퀀스
 
 ### 미션 순서
 1. **시작** → gate_start로 이동 (navigate_avoid)
 2. **게이트 통과** (카메라 필수)
-   - gate_start 도착 시 dorodori로 적/녹 부표 탐색
-   - 카메라에서 녹색(좌)·적색(우) 부표 위치 확인
-   - 이미지 X좌표 → LiDAR 인덱스 변환
+   - clusters 있으면 align, 없으면 dorodori로 적/녹 부표 탐색
+   - 카메라에서 녹색(좌)·적색(우) 부표 위치 확인 (변환 공식은 VISION_GUIDE 참고)
    - gate_pass 명령으로 중간점 통과
    - gate_end까지 navigate_direct
 3. **부표 선회** (카메라 필수) - 녹색(GREEN) 부표
    - buoy_orbit 지점 도착
-   - dorodori로 녹색 부표 탐색
+   - clusters 있으면 align, 없으면 dorodori로 녹색 부표 탐색
    - 카메라에서 녹색 부표 위치 확인 → LiDAR 인덱스
    - orbit 명령 (radius: 8m, direction: cw, 6 waypoints)
 4. **호핑투어**
@@ -390,8 +405,7 @@ MISSION_SEQUENCE_PROMPT = """
    - hopping → obstacle_end_dock_start 구간
    - navigate_avoid로 장애물 자동 회피
 6. **도킹** (카메라 필수)
-   - obstacle_end_dock_start 도착
-   - dorodori로 도킹 스테이션 탐색
+   - clusters 있으면 align, 없으면 dorodori로 도킹 스테이션 탐색
    - 카메라에서 마커/색상 인식
    - navigate_direct로 저속 진입
    - hover 3초로 정박 완료
@@ -400,39 +414,4 @@ MISSION_SEQUENCE_PROMPT = """
 - 게이트 통과: 적(좌)/녹(우) 부표 인식
 - 부표 선회: 녹색(GREEN) 부표 탐색
 - 도킹: 마커/도형 인식
-
-### 이미지 X좌표 → LiDAR 인덱스 변환
-```
-lidar_angle = (320 - image_x) / 320 * 60
-if lidar_angle < 0:
-    lidar_idx = 360 + lidar_angle
-else:
-    lidar_idx = lidar_angle
-```
-예: 이미지 x=160 (왼쪽) → +30° → idx=30
-예: 이미지 x=480 (오른쪽) → -30° → idx=330
-"""
-
-
-# 이미지 좌표 → LiDAR 인덱스 변환 가이드
-IMAGE_TO_LIDAR_GUIDE = """
-## 이미지-LiDAR 인덱스 매핑
-
-카메라 시야각(FOV)이 약 120°라고 가정할 때:
-- 이미지 중앙 (x=320, 640px 기준) → LiDAR 0° (정면)
-- 이미지 왼쪽 끝 (x=0) → LiDAR +60° (좌현 60°)
-- 이미지 오른쪽 끝 (x=640) → LiDAR -60° (우현 60°, 또는 300°)
-
-변환 공식:
-lidar_angle = (320 - image_x) / 320 * 60
-
-예시:
-- 이미지에서 x=160 (왼쪽 1/4) → lidar_angle ≈ +30° → lidar_idx = 30
-- 이미지에서 x=480 (오른쪽 1/4) → lidar_angle ≈ -30° → lidar_idx = 330
-
-색상 부표 감지 시:
-1. 이미지에서 부표의 x 좌표 확인
-2. 위 공식으로 LiDAR 인덱스 추정
-3. 해당 인덱스의 LiDAR 거리값 확인
-4. `gate_pass` 또는 `orbit`에 인덱스 전달
 """

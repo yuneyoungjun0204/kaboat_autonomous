@@ -420,6 +420,64 @@ def get_goal_info(boat: Boat, goal_x: float, goal_y: float) -> dict:
 # 8. LiDAR 분석 유틸리티 (LLM 상황 판단용)
 # ============================================================
 
+def detect_lidar_clusters(boat: Boat, max_range: float = None, gap_deg: int = None,
+                           min_points: int = None, max_clusters: int = None) -> List[dict]:
+    """
+    인접한 유효 반사점들을 각도 기준으로 묶어 물체 클러스터 후보를 찾는다
+    (부표가 모인 곳, 도킹 스테이션 등). 탐색 시 dorodori(광역 스윕)보다
+    먼저 확인해 클러스터 방향으로 align_to_heading을 우선 시도하기 위함.
+
+    Returns:
+        가까운 순 정렬된 클러스터 리스트. 각 원소:
+        {'center_angle': 보트 기준 각도(도, LiDAR idx 컨벤션),
+         'distance': 최근접 거리(m), 'width_deg': 각폭, 'point_count': 포인트 수}
+    """
+    if max_range is None:
+        max_range = SETTINGS.CLUSTER_MAX_RANGE
+    if gap_deg is None:
+        gap_deg = SETTINGS.CLUSTER_GAP_DEG
+    if min_points is None:
+        min_points = SETTINGS.CLUSTER_MIN_POINTS
+    if max_clusters is None:
+        max_clusters = SETTINGS.CLUSTER_MAX_COUNT
+
+    scan = np.array(boat.scan)
+    n = len(scan)
+    valid_idx = np.where((scan > 0) & (scan < max_range))[0]
+    if len(valid_idx) == 0:
+        return []
+
+    groups = [[int(valid_idx[0])]]
+    for idx in valid_idx[1:]:
+        idx = int(idx)
+        if idx - groups[-1][-1] <= gap_deg:
+            groups[-1].append(idx)
+        else:
+            groups.append([idx])
+
+    # 0°/360° 경계에서 갈라진 첫/마지막 그룹을 하나로 병합 (각도 랩어라운드)
+    if len(groups) > 1:
+        wrap_gap = (groups[0][0] + n) - groups[-1][-1]
+        if wrap_gap <= gap_deg:
+            groups[-1] = groups[-1] + [i + n for i in groups[0]]
+            groups = groups[1:]
+
+    clusters = []
+    for g in groups:
+        if len(g) < min_points:
+            continue
+        dists = scan[[i % n for i in g]]
+        clusters.append({
+            'center_angle': round(float(normalize_angle(sum(g) / len(g))), 1),
+            'distance': round(float(np.min(dists)), 1),
+            'width_deg': round(float(max(g) - min(g)), 1),
+            'point_count': len(g),
+        })
+
+    clusters.sort(key=lambda c: c['distance'])
+    return clusters[:max_clusters]
+
+
 def analyze_lidar(boat: Boat) -> dict:
     """
     LiDAR 데이터 요약 (LLM이 상황 판단에 사용).
@@ -473,5 +531,6 @@ def analyze_lidar(boat: Boat) -> dict:
             'distance': round(float(closest_dist), 1)
         },
         'gate_detected': bool(gate_detected),
-        'obstacle_count': int(np.sum(valid))
+        'obstacle_count': int(np.sum(valid)),
+        'clusters': detect_lidar_clusters(boat)
     }

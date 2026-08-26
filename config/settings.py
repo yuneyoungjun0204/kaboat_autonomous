@@ -107,6 +107,12 @@ MIN_VALID_RANGE = 1.0   # 이 미만은 LiDAR 마운트 자기반사로 간주�
 LIDAR_SMOOTHING_ENABLED = True   # LiDAR 지수 평균 스무딩
 LIDAR_SMOOTHING_DECAY = 0.95     # 스무딩 감쇠율 (높을수록 넓게 평균)
 
+# 클러스터 탐지 (부표 무리/도킹 스테이션 후보 - align 우선 탐색용)
+CLUSTER_MAX_RANGE = 25.0   # 클러스터 탐색 최대 거리 (m) - 이 밖은 무시
+CLUSTER_GAP_DEG = 6        # 같은 클러스터로 묶을 최대 각도 간격 (도)
+CLUSTER_MIN_POINTS = 3     # 노이즈 제외 최소 포인트 수
+CLUSTER_MAX_COUNT = 3      # 반환할 최대 클러스터 수 (가까운 순)
+
 # ROS2 토픽 이름 (VRX)
 TOPICS = {
     'gps': '/wamv/sensors/gps/fix',
