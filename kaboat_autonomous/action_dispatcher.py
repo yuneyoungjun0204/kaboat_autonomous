@@ -27,8 +27,11 @@ import json
 import time
 import sys
 import os
+from datetime import datetime
+from pathlib import Path
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append('/home/yune/ros-mcp-server/history')
 
 try:
     from config import settings as SETTINGS
@@ -39,12 +42,26 @@ except ImportError:
 from kaboat_autonomous.controllers.autonomous_module import Boat, normalize_angle
 from kaboat_autonomous.controllers import maneuvers
 
+try:
+    from mission_logger import MissionLogger
+    LOGGING_ENABLED = True
+except ImportError:
+    LOGGING_ENABLED = False
+    print("[ActionDispatcher] mission_logger not found, logging disabled")
+
 
 class ActionDispatcher(Node):
     """LLM 명령 → 모듈 실행 디스패처"""
 
     def __init__(self):
         super().__init__('action_dispatcher')
+
+        # 미션 로거 초기화
+        if LOGGING_ENABLED:
+            self.logger = MissionLogger()
+            self.get_logger().info(f'Mission logging to: {self.logger.get_session_path()}')
+        else:
+            self.logger = None
 
         # Boat 상태
         self.boat = Boat()
@@ -122,6 +139,15 @@ class ActionDispatcher(Node):
             cmd = json.loads(msg.data)
             action = cmd.get('action', '')
             self.get_logger().info(f'[LLM] Action received: {action}')
+
+            # 미션 로깅
+            if self.logger:
+                sensor_state = {
+                    'position': {'x': self.boat.position[0], 'y': self.boat.position[1]},
+                    'heading': self.boat.psi
+                }
+                self.logger.log_action(action, cmd, "started")
+                self.logger.log_sensor_state(sensor_state)
 
             # 액션 초기화
             self.current_action = action
@@ -244,6 +270,10 @@ class ActionDispatcher(Node):
 
         if maneuvers.is_goal_reached(self.boat, goal_x, goal_y):
             self.get_logger().info('navigate_avoid: goal reached')
+            if self.logger:
+                self.logger.log_waypoint_reached('navigate_avoid_goal', {
+                    'x': self.boat.position[0], 'y': self.boat.position[1]
+                })
             self.current_action = None
             return 0.0, 0.0
 
@@ -256,6 +286,10 @@ class ActionDispatcher(Node):
 
         if maneuvers.is_goal_reached(self.boat, goal_x, goal_y):
             self.get_logger().info('navigate_direct: goal reached')
+            if self.logger:
+                self.logger.log_waypoint_reached('navigate_direct_goal', {
+                    'x': self.boat.position[0], 'y': self.boat.position[1]
+                })
             self.current_action = None
             return 0.0, 0.0
 
@@ -326,6 +360,8 @@ class ActionDispatcher(Node):
         """웨이포인트 순차 추종 (orbit, gate_pass, waypoints)"""
         if self.current_waypoint_idx >= len(self.waypoint_queue):
             self.get_logger().info(f'{self.current_action}: all waypoints complete')
+            if self.logger:
+                self.logger.log_action(self.current_action, {}, "completed")
             self.current_action = None
             return 0.0, 0.0
 
@@ -336,6 +372,11 @@ class ActionDispatcher(Node):
             self.get_logger().info(
                 f'{self.current_action}: waypoint {self.current_waypoint_idx}/{len(self.waypoint_queue)}'
             )
+            if self.logger:
+                self.logger.log_waypoint_reached(
+                    f'{self.current_action}_wp{self.current_waypoint_idx}',
+                    {'x': self.boat.position[0], 'y': self.boat.position[1]}
+                )
             return 0.0, 0.0
 
         # 장애물 회피 사용 여부
