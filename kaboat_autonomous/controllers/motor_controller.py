@@ -69,6 +69,23 @@ class MotorController(Node):
         output = SETTINGS.KP * error + SETTINGS.KD * derivative
         return output
 
+    def turn_cap(self, psi_error: float, max_sat: float) -> float:
+        """
+        회전 출력 상한을 목표 헤딩과의 잔여 각도에 따라 낮춘다.
+
+        기존에는 KP*error가 max_sat 아래로 떨어지는 지점(대략 max_sat/KP,
+        KP=100/max_sat=2400 기준 24° 부근)에서만 감속이 시작돼 제동 구간이
+        너무 좁았다. 그 결과 align처럼 tau_x=0인 제자리 회전에서 보트가
+        이미 붙은 회전 관성을 못 이기고 목표를 넘겨버리는 오버슈트가
+        발생했다 (2026-08-26 실측). TURN_DECEL_ZONE_DEG부터 선형으로
+        줄여 제동 구간을 넓힌다.
+        """
+        abs_err = abs(psi_error)
+        if abs_err >= SETTINGS.TURN_DECEL_ZONE_DEG:
+            return max_sat
+        ratio = max(abs_err / SETTINGS.TURN_DECEL_ZONE_DEG, SETTINGS.TURN_MIN_CAP_RATIO)
+        return max_sat * ratio
+
     def command_callback(self, msg: Float32MultiArray):
         """
         명령 수신 콜백
@@ -88,6 +105,10 @@ class MotorController(Node):
         # PD 제어로 회전 토크 계산
         # psi_error > 0: 반시계방향(왼쪽) 회전 필요 → 오른쪽 추력 증가
         tau_n = self.pd_control(psi_error)
+
+        # 목표에 가까워질수록 회전 출력 상한을 낮춰 오버슈트 방지
+        turn_cap = self.turn_cap(psi_error, max_sat)
+        tau_n = max(-turn_cap, min(turn_cap, tau_n))
 
         # 차동 추진 계산 (WAM-V: 좌/우 스러스터)
         # 반시계방향 회전: right > left

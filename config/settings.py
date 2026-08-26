@@ -62,20 +62,43 @@ GOAL_RANGE = 3.0       # 웨이포인트 도착 판정 거리 (m)
 # PD 제어 파라미터
 # VRX 스러스터는 velocity_control=true (각속도 rad/s 입력)
 # 1000N 추력 ≈ 12 rad/s, 2000N ≈ 17 rad/s
-# max_thrust_cmd ≈ 2354 rad/s (VRX 설정)
+# max_thrust_cmd ≈ 2354 rad/s (VRX 설정) - 아래 MAX_THRUST를 2배로 올리면서
+# 이 하드웨어 한계를 넘어서게 됐다. 넘는 값은 시뮬레이터에서 자체적으로
+# 클리핑되니 안전하지만, 그 이상은 체감 속도가 늘지 않는다는 점 참고.
 KP = 100.0              # 비례 계수 (각속도 제어용)
 KD = 12.0              # 미분 계수
-MAX_THRUST = 1200.0    # 최대 각속도 (rad/s) - VRX 스러스터 최대
+MAX_THRUST = 2400.0    # 최대 각속도 (rad/s) - VRX 스러스터 최대 (2026-08-26: 2배 증속)
+
+# 회전 감속 구간 - align/dorodori 등 제자리 회전 시, 목표 헤딩에 가까워질수록
+# 최대 회전 출력을 낮춰 관성으로 인한 오버슈트를 방지한다.
+# 기존에는 KP*error가 max_sat 밑으로 내려가는 지점(약 max_sat/KP ≈ 12°
+# 부근)에서만 감속이 시작돼 구간이 너무 좁았음 (2026-08-26 실측: align이
+# 목표를 넘겨 반대편까지 틀어버리는 오버슈트 확인). TURN_DECEL_ZONE_DEG부터
+# 선형으로 줄여 제동 구간을 넓힌다.
+TURN_DECEL_ZONE_DEG = 45.0   # 이 각도(도) 이내부터 회전 출력 선형 감쇠 시작
+TURN_MIN_CAP_RATIO = 0.15    # 감쇠 최저치 (max_sat 대비 비율) - 잔여 오차를 계속 좁힐 수 있게 완전히 0으로는 두지 않음
+
+# align 정착(settle) 판정 - tolerance 이내로 순간적으로 스쳐 지나가는 것만으로
+# "정렬 완료"로 끝내버리면, 아직 회전 관성이 남아있는 상태에서 제어가 뚝
+# 끊겨 목표를 넘어 계속 돌아가버리는 문제가 있었다 (2026-08-26 실측: 116°
+# 목표가 141.8°까지 밀려난 뒤에야 정지 - 위치만 보고 끝냈더니 빠르게 회전
+# 중에도 tolerance 구간을 스쳐 지나가며 조건을 잠깐 만족시켰음). 그래서
+# 위치(tolerance)뿐 아니라 IMU 실측 요(yaw) 각속도(ALIGN_SETTLE_MAX_YAW_RATE_DEG
+# 미만)까지 같이 봐야 "진짜로 멈췄다"고 판단한다. 두 조건이 이 틱 수만큼
+# 연속 유지돼야("정착") 비로소 정렬 완료로 판정한다 (control_loop가 10Hz이므로
+# 5틱 ≈ 0.5초).
+ALIGN_SETTLE_TICKS = 5
+ALIGN_SETTLE_MAX_YAW_RATE_DEG = 5.0   # 이 각속도(도/초) 미만이어야 "회전 멈춤"으로 인정
 
 # ============================================================
 # 추력 설정 (장애물 회피 속도 기준)
 # ============================================================
-# 속도 티어 (직접 지정)
-TURBO_THRUST = 1500.0      # 터보: 최고속 직진
-FAST_THRUST = 1000.0       # 빠름: 클리어 직진
-NORMAL_THRUST = 500.0      # 보통: 장애물 회피 = 기준
-SLOW_THRUST = 300.0        # 느림: 도킹 접근
-CRAWL_THRUST = 200.0       # 초저속: 정밀 접근
+# 속도 티어 (직접 지정) - 2026-08-26: 전부 2배 증속
+TURBO_THRUST = 3000.0      # 터보: 최고속 직진
+FAST_THRUST = 2000.0       # 빠름: 클리어 직진
+NORMAL_THRUST = 1000.0     # 보통: 장애물 회피 = 기준
+SLOW_THRUST = 600.0        # 느림: 도킹 접근
+CRAWL_THRUST = 400.0       # 초저속: 정밀 접근
 
 # pathplan()의 기준 추력
 MAX_FORWARD_THRUST = FAST_THRUST         # 최대 전진 (1000)
@@ -112,6 +135,43 @@ CLUSTER_MAX_RANGE = 25.0   # 클러스터 탐색 최대 거리 (m) - 이 밖은 
 CLUSTER_GAP_DEG = 6        # 같은 클러스터로 묶을 최대 각도 간격 (도)
 CLUSTER_MIN_POINTS = 3     # 노이즈 제외 최소 포인트 수
 CLUSTER_MAX_COUNT = 3      # 반환할 최대 클러스터 수 (가까운 순)
+
+# 클러스터 히스테리시스 (ClusterTracker - RViz 평가용, 아직 LLM 파이프라인 미연결)
+CLUSTER_MATCH_ANGLE_TOL = 12.0  # 프레임간 같은 클러스터로 볼 각도 오차 허용치 (도)
+CLUSTER_MIN_HITS = 2            # 이 프레임 수 이상 연속 관측돼야 "안정" 클러스터로 인정
+CLUSTER_MAX_MISSES = 2          # 이 프레임 수 연속 미관측이면 트랙 폐기
+
+# 3D 포인트클라우드 클러스터링 (/wamv/sensors/lidar/points 기준, 평가용)
+# 2D LaserScan 클러스터링(CLUSTER_*)과 별개 - x,y 평면에 격자(voxel)를 깔고
+# 인접 셀을 연결(connected components)해 물체 후보를 찾는다. z를 함께 걸러
+# 수면 반사/자기구조물을 배제할 수 있는 게 2D 대비 핵심 차이점.
+CLUSTER3D_MAX_RANGE = 25.0   # 클러스터 탐색 최대 수평 거리 (m)
+CLUSTER3D_VOXEL_SIZE = 1.0   # 격자 셀 크기 (m) - 이 셀 크기 이내로 인접하면 같은 물체 후보
+CLUSTER3D_MIN_POINTS = 5     # 노이즈 제외 최소 포인트 수 (3D는 점이 훨씬 많아 2D보다 높게)
+CLUSTER3D_MAX_COUNT = 3      # 반환할 최대 클러스터 수 (가까운 순)
+CLUSTER3D_Z_MIN = -1.1       # 센서 기준 이 아래(z, m)는 수면/자기반사로 간주해 제외
+CLUSTER3D_Z_MAX = 5.0        # 센서 기준 이 위는 마스트/구조물 오탐 방지로 제외
+# Z_MIN 실측 근거 (2026-08-26, 정박 상태 시뮬레이터): 25m 이내 유효 포인트의
+# 99%가 z=-1.5±0.05~0.24m에 몰려 있음(ring 0~5, 수면 반사) - 95th percentile이
+# -1.19라 그 위로 여유를 두고 -1.1로 설정. 파도/틸트 있는 실주행에서는 이 값도
+# 흔들릴 수 있으니 RViz로 재확인 후 조정할 것 (CLUSTER3D_Z_MAX는 미실측 잠정값).
+
+CLUSTER3D_STALE_SEC = 1.0    # PointCloud2가 이 시간(초) 이상 안 오면 2D LaserScan
+                              # 클러스터링(detect_lidar_clusters)으로 폴백 (cluster_visualizer.py)
+
+# 클러스터 거부 기록 (reject_cluster 액션 - 카메라로 "타깃 아님" 확인된 곳을
+# 전역 좌표로 기억해 재탐색 방지. LLM 대화가 짧게 끊겨도 action_dispatcher
+# 프로세스가 미션 내내 살아있는 동안은 유지됨)
+REJECT_CLUSTER_RADIUS_M = 5.0    # 이 거리(m) 이내면 같은 지점으로 간주
+REJECT_CLUSTER_MAX_COUNT = 20    # 최대 보관 개수 (초과 시 오래된 것부터 폐기)
+
+# 카메라 시야각 (wamv_camera.xacro horizontal_fov=1.3962634 rad ≈ 80.01° 기준,
+# /wamv/sensors/camera/image_raw 전방 카메라 1대 - autonomous.launch.py 참고)
+# align 도중 타깃이 실제로 프레임에 들어왔을 때만 카메라를 확인해 헛촬영을
+# 피하기 위한 기준값. cluster.center_angle은 보트 기준 상대각이라 카메라
+# 중심(보트 정면)과 직접 비교 가능하다.
+CAMERA_HALF_FOV_DEG = 40.0       # 카메라 좌우 반시야각 (도)
+CAMERA_CHECK_MARGIN_DEG = 10.0   # 프레임 가장자리 여유 (렌즈 왜곡/부분 프레임 회피)
 
 # ROS2 토픽 이름 (VRX)
 TOPICS = {

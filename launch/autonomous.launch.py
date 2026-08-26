@@ -20,10 +20,12 @@ def generate_launch_description():
                 /world/kaboat_course/model/wamv/link/wamv/gps_wamv_link/sensor/navsat/navsat@sensor_msgs/msg/NavSatFix[gz.msgs.NavSat \
                 /world/kaboat_course/model/wamv/link/wamv/imu_wamv_link/sensor/imu_wamv_sensor/imu@sensor_msgs/msg/Imu[gz.msgs.IMU \
                 /world/kaboat_course/model/wamv/link/wamv/base_link/sensor/lidar_wamv_sensor/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan \
+                /world/kaboat_course/model/wamv/link/wamv/base_link/sensor/lidar_wamv_sensor/scan/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked \
                 --ros-args \
                 -r /world/kaboat_course/model/wamv/link/wamv/gps_wamv_link/sensor/navsat/navsat:=/wamv/sensors/gps/fix \
                 -r /world/kaboat_course/model/wamv/link/wamv/imu_wamv_link/sensor/imu_wamv_sensor/imu:=/wamv/sensors/imu/data \
-                -r /world/kaboat_course/model/wamv/link/wamv/base_link/sensor/lidar_wamv_sensor/scan:=/wamv/sensors/lidar/scan
+                -r /world/kaboat_course/model/wamv/link/wamv/base_link/sensor/lidar_wamv_sensor/scan:=/wamv/sensors/lidar/scan \
+                -r /world/kaboat_course/model/wamv/link/wamv/base_link/sensor/lidar_wamv_sensor/scan/points:=/wamv/sensors/lidar/points
         '''],
         name='sensor_bridge',
         output='screen'

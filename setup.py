@@ -36,6 +36,7 @@ setup(
             'llm_interface = kaboat_autonomous.llm_interface:main',
             'action_dispatcher = kaboat_autonomous.action_dispatcher:main',
             'sensor_fusion = kaboat_autonomous.sensor_fusion:main',
+            'cluster_visualizer = kaboat_autonomous.cluster_visualizer:main',
         ],
     },
 )
