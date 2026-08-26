@@ -71,9 +71,11 @@ MAX_THRUST = 1200.0    # 최대 각속도 (rad/s) - VRX 스러스터 최대
 # 추력 설정 (장애물 회피 속도 기준)
 # ============================================================
 # 속도 티어 (직접 지정)
+TURBO_THRUST = 1500.0      # 터보: 최고속 직진
 FAST_THRUST = 1000.0       # 빠름: 클리어 직진
 NORMAL_THRUST = 500.0      # 보통: 장애물 회피 = 기준
 SLOW_THRUST = 300.0        # 느림: 도킹 접근
+CRAWL_THRUST = 200.0       # 초저속: 정밀 접근
 
 # pathplan()의 기준 추력
 MAX_FORWARD_THRUST = FAST_THRUST         # 최대 전진 (1000)
