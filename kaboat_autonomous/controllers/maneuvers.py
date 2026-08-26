@@ -726,11 +726,11 @@ def analyze_lidar(boat: Boat) -> dict:
         closest_dist = float(valid_dists[min_idx])
 
     # 전방 장애물 분포 (LLM이 직접 추론할 수 있게 raw 데이터 제공)
-    # -60° ~ +60° 범위를 6개 섹터로 나눠 각 섹터의 최소 거리 제공
+    # -120° ~ +120° 범위를 12개 섹터로 나눠 각 섹터의 최소 거리 제공
     # 양수 = 좌측, 음수 = 우측 (카메라 관점과 일치)
     front_sectors = []
-    for sector_idx in range(6):
-        angle_start = -60 + sector_idx * 20
+    for sector_idx in range(12):
+        angle_start = -120 + sector_idx * 20
         angle_end = angle_start + 20
         angle_center = angle_start + 10
 
