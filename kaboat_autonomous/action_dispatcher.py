@@ -77,6 +77,17 @@ class ActionDispatcher(Node):
 
         # 타이머 기반 상태 (dorodori 등)
         self.action_elapsed = 0.0
+        self.align_settle_count = 0  # align이 tolerance 이내에 연속으로 머문 틱 수
+        self.yaw_rate_deg = 0.0      # IMU 기반 실제 요(yaw) 각속도 (도/초)
+
+        # === 압축 상태(blackboard) ===
+        # LLM 대화를 매 판단마다 짧게 끊어도(bounded-context) "방금 뭘 했는지,
+        # 뭐가 실패했는지, 이미 아니라고 확인된 방향"을 잃지 않도록 이 노드
+        # 프로세스(미션 내내 살아있음)가 최소 정보만 요약해서 들고 있는다.
+        self.last_action = None
+        self.last_action_result = None
+        self.action_retry_count = {}   # {action_name: 연속 실패 횟수}
+        self.rejected_clusters = []    # [{'x':.., 'y':.., 'reason':..}, ...] 전역 좌표
 
         # === Publishers ===
         self.cmd_pub = self.create_publisher(Float32MultiArray, '/command', 10)
@@ -110,6 +121,11 @@ class ActionDispatcher(Node):
         siny_cosp = 2 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
         self.boat.psi = np.degrees(np.arctan2(siny_cosp, cosy_cosp))
+        # 실제 요(yaw) 각속도 - align 정착 판정에 사용. heading이 순간적으로
+        # tolerance 안에 들어온 것만으로는 "회전이 멈췄다"를 보장 못 한다
+        # (빠르게 지나치는 중에도 위치 조건은 잠깐 만족될 수 있음 - 2026-08-26
+        # 실측: 목표 116°에서 141.8°까지 밀려난 뒤에야 정지).
+        self.yaw_rate_deg = np.degrees(msg.angular_velocity.z)
 
     def lidar_callback(self, msg: LaserScan):
         ranges = np.array(msg.ranges)
@@ -125,8 +141,11 @@ class ActionDispatcher(Node):
 
         self.boat.scan = ranges.tolist()
 
-        # LiDAR 요약 발행 (LLM 판단용)
+        # LiDAR 요약 발행 (LLM 판단용) - 거부 기록된 클러스터는 rejected:true로 표시
         summary = maneuvers.analyze_lidar(self.boat)
+        summary['clusters'] = maneuvers.annotate_cluster_rejection(
+            self.boat, summary['clusters'], self.rejected_clusters
+        )
         msg_out = String()
         msg_out.data = json.dumps(summary)
         self.lidar_pub.publish(msg_out)
@@ -165,13 +184,57 @@ class ActionDispatcher(Node):
             elif action == 'stop':
                 self._stop()
             elif action == 'align':
-                pass  # align은 control_loop에서 처리
+                self.align_settle_count = 0  # 정착 카운터 리셋
+            elif action == 'align_to_cluster':
+                self.align_settle_count = 0
+                self._init_align_to_cluster(cmd)
             elif action == 'analyze':
                 self._publish_analysis()
+                self.current_action = None
+            elif action == 'reject_cluster':
+                self._reject_cluster(cmd)
                 self.current_action = None
 
         except json.JSONDecodeError as e:
             self.get_logger().error(f'Invalid JSON: {e}')
+
+    # === 압축 상태(blackboard) 기록 ===
+
+    FAILURE_RESULTS = {'timeout', 'failed_no_lidar'}
+
+    def _record_result(self, action: str, result: str):
+        """액션이 끝날 때 결과를 요약 기록. 실패면 재시도 카운트 증가, 성공이면 리셋."""
+        self.last_action = action
+        self.last_action_result = result
+        if result in self.FAILURE_RESULTS:
+            self.action_retry_count[action] = self.action_retry_count.get(action, 0) + 1
+        else:
+            self.action_retry_count[action] = 0
+
+    def _reject_cluster(self, cmd):
+        """카메라로 확인해 타깃이 아니라고 판정된 클러스터를 전역 좌표로 기억
+        (같은 곳으로 재탐색/재정렬하지 않도록). 대화가 짧게 끊겨도 이 노드
+        프로세스가 살아있는 동안은 유지됨."""
+        angle = cmd.get('angle')
+        if angle is None:
+            self.get_logger().warn('reject_cluster: angle missing')
+            return
+
+        distance = cmd.get('distance')
+        if distance is None:
+            distance = self.boat.scan[int(round(angle)) % 360]
+        if not distance or distance <= 0:
+            self.get_logger().warn('reject_cluster: no valid distance, skip')
+            return
+
+        x, y = maneuvers.reject_cluster_point(self.boat, float(angle), float(distance))
+        self.rejected_clusters.append({
+            'x': round(x, 1), 'y': round(y, 1),
+            'reason': cmd.get('reason', ''),
+        })
+        if len(self.rejected_clusters) > SETTINGS.REJECT_CLUSTER_MAX_COUNT:
+            self.rejected_clusters.pop(0)
+        self.get_logger().info(f"Cluster rejected @ ({x:.1f}, {y:.1f}): {cmd.get('reason', '')}")
 
     def _init_orbit(self, cmd):
         """궤도 웨이포인트 생성"""
@@ -187,6 +250,7 @@ class ActionDispatcher(Node):
             self.get_logger().info(f'Orbit: {len(waypoints)} waypoints generated')
         else:
             self.get_logger().warn(f'Orbit failed: no valid lidar at idx {idx}')
+            self._record_result('orbit', 'failed_no_lidar')
             self.current_action = None
 
     def _init_gate_pass(self, cmd):
@@ -201,6 +265,7 @@ class ActionDispatcher(Node):
             self.get_logger().info(f'Gate pass: midpoint at ({wp[0]:.1f}, {wp[1]:.1f})')
         else:
             self.get_logger().warn('Gate pass failed: invalid lidar indices')
+            self._record_result('gate_pass', 'failed_no_lidar')
             self.current_action = None
 
     def _init_waypoints(self, cmd):
@@ -255,6 +320,8 @@ class ActionDispatcher(Node):
             psi_error, tau_x = self._exec_hover()
         elif self.current_action == 'align':
             psi_error, tau_x = self._exec_align()
+        elif self.current_action == 'align_to_cluster':
+            psi_error, tau_x = self._exec_align_to_cluster()
         elif self.current_action in ('orbit', 'gate_pass', 'waypoints'):
             psi_error, tau_x = self._exec_waypoint_follow()
 
@@ -274,15 +341,17 @@ class ActionDispatcher(Node):
                 self.logger.log_waypoint_reached('navigate_avoid_goal', {
                     'x': self.boat.position[0], 'y': self.boat.position[1]
                 })
+            self._record_result('navigate_avoid', 'goal_reached')
             self.current_action = None
             return 0.0, 0.0
 
         return maneuvers.navigate_avoid(self.boat, goal_x, goal_y)
 
     def _exec_navigate_direct(self):
-        """직진 항법"""
+        """직진 항법 (hold_heading 지정 시 목표 방향 대신 해당 헤딩을 유지하며 직진)"""
         goal_x = self.action_params.get('goal_x', self.boat.position[0])
         goal_y = self.action_params.get('goal_y', self.boat.position[1])
+        hold_heading = self.action_params.get('hold_heading')
 
         if maneuvers.is_goal_reached(self.boat, goal_x, goal_y):
             self.get_logger().info('navigate_direct: goal reached')
@@ -290,10 +359,11 @@ class ActionDispatcher(Node):
                 self.logger.log_waypoint_reached('navigate_direct_goal', {
                     'x': self.boat.position[0], 'y': self.boat.position[1]
                 })
+            self._record_result('navigate_direct', 'goal_reached')
             self.current_action = None
             return 0.0, 0.0
 
-        return maneuvers.navigate_direct(self.boat, goal_x, goal_y)
+        return maneuvers.navigate_direct(self.boat, goal_x, goal_y, hold_heading=hold_heading)
 
     def _exec_backward(self):
         """후진"""
@@ -302,6 +372,7 @@ class ActionDispatcher(Node):
 
         if self.action_elapsed >= duration:
             self.get_logger().info('backward: complete')
+            self._record_result('backward', 'completed')
             self.current_action = None
             return 0.0, 0.0
 
@@ -315,6 +386,7 @@ class ActionDispatcher(Node):
 
         if self.action_elapsed >= duration:
             self.get_logger().info('dorodori: complete')
+            self._record_result('dorodori', 'completed')
             self.current_action = None
             return 0.0, 0.0
 
@@ -328,13 +400,20 @@ class ActionDispatcher(Node):
 
         if self.action_elapsed >= duration:
             self.get_logger().info('hover: complete')
+            self._record_result('hover', 'completed')
             self.current_action = None
             return 0.0, 0.0
 
         return maneuvers.hover(self.boat, hold_x, hold_y)
 
     def _exec_align(self):
-        """헤딩 정렬"""
+        """헤딩 정렬 - tolerance 이내 + 실제 회전(yaw rate)이 거의 멎은 상태가
+        ALIGN_SETTLE_TICKS만큼 연속돼야 완료.
+        위치(psi_error)만 보고 끝내면, 빠르게 회전하며 tolerance 구간을
+        스쳐 지나가는 순간에도 조건이 잠깐 만족돼 제어가 끊기고 - 그 시점의
+        회전 관성 때문에 목표를 훨씬 넘어가버린다 (2026-08-26 실측: 목표
+        116°에서 141.8°까지 밀려난 뒤에야 정지). yaw_rate_deg를 함께 봐야
+        진짜로 멈췄는지 알 수 있다."""
         target_heading = self.action_params.get('heading', 0.0)
         tolerance = self.action_params.get('tolerance', 5.0)
         timeout = self.action_params.get('timeout', 10.0)
@@ -342,16 +421,74 @@ class ActionDispatcher(Node):
         # 타임아웃 체크
         if self.action_elapsed >= timeout:
             self.get_logger().info('align: timeout')
+            self._record_result('align', 'timeout')
             self.current_action = None
+            self.align_settle_count = 0
             return 0.0, 0.0
 
-        psi_error, tau_x, aligned = maneuvers.align_to_heading(
+        psi_error, tau_x, in_tolerance = maneuvers.align_to_heading(
             self.boat, target_heading, tolerance
         )
 
-        if aligned:
-            self.get_logger().info(f'align: aligned to {target_heading:.1f}°')
+        settled_now = in_tolerance and abs(self.yaw_rate_deg) < SETTINGS.ALIGN_SETTLE_MAX_YAW_RATE_DEG
+        self.align_settle_count = self.align_settle_count + 1 if settled_now else 0
+
+        if self.align_settle_count >= SETTINGS.ALIGN_SETTLE_TICKS:
+            self.get_logger().info(f'align: aligned to {target_heading:.1f}° (settled)')
+            self._record_result('align', 'aligned')
             self.current_action = None
+            self.align_settle_count = 0
+            return 0.0, 0.0
+
+        return psi_error, tau_x
+
+    def _init_align_to_cluster(self, cmd):
+        """클러스터 기준 정렬 초기화 - 클러스터 ID로 해당 물체 방향을 찾아 저장"""
+        cluster_id = cmd.get('cluster_id', 0)
+        clusters = maneuvers.detect_lidar_clusters(self.boat)
+
+        if cluster_id < len(clusters):
+            cluster = clusters[cluster_id]
+            self.action_params['target_angle'] = cluster['angle']
+            self.get_logger().info(
+                f'align_to_cluster: id={cluster_id} → angle={cluster["angle"]:.1f}°'
+            )
+        else:
+            self.get_logger().warn(f'align_to_cluster: id={cluster_id} not found')
+            self.action_params['target_angle'] = None
+
+    def _exec_align_to_cluster(self):
+        """클러스터 기준 정렬 실행 - 저장된 클러스터 각도로 정렬"""
+        target_angle = self.action_params.get('target_angle')
+        if target_angle is None:
+            self._record_result('align_to_cluster', 'failed_no_cluster')
+            self.current_action = None
+            return 0.0, 0.0
+
+        # 클러스터 각도를 절대 헤딩으로 변환
+        target_heading = (self.boat.psi + target_angle) % 360
+        tolerance = self.action_params.get('tolerance', 5.0)
+        timeout = self.action_params.get('timeout', 10.0)
+
+        if self.action_elapsed >= timeout:
+            self.get_logger().info('align_to_cluster: timeout')
+            self._record_result('align_to_cluster', 'timeout')
+            self.current_action = None
+            self.align_settle_count = 0
+            return 0.0, 0.0
+
+        psi_error, tau_x, in_tolerance = maneuvers.align_to_heading(
+            self.boat, target_heading, tolerance
+        )
+
+        settled_now = in_tolerance and abs(self.yaw_rate_deg) < SETTINGS.ALIGN_SETTLE_MAX_YAW_RATE_DEG
+        self.align_settle_count = self.align_settle_count + 1 if settled_now else 0
+
+        if self.align_settle_count >= SETTINGS.ALIGN_SETTLE_TICKS:
+            self.get_logger().info(f'align_to_cluster: aligned to cluster angle {target_angle:.1f}°')
+            self._record_result('align_to_cluster', 'aligned')
+            self.current_action = None
+            self.align_settle_count = 0
             return 0.0, 0.0
 
         return psi_error, tau_x
@@ -362,6 +499,7 @@ class ActionDispatcher(Node):
             self.get_logger().info(f'{self.current_action}: all waypoints complete')
             if self.logger:
                 self.logger.log_action(self.current_action, {}, "completed")
+            self._record_result(self.current_action, 'completed')
             self.current_action = None
             return 0.0, 0.0
 
@@ -392,8 +530,16 @@ class ActionDispatcher(Node):
         """현재 상태 발행 (LLM 모니터링용)"""
         status = {
             'timestamp': round(time.time(), 1),
+            # 진행 중인 액션이 없을 때만 true. 폴링 루프가 이 플래그로
+            # "지금 LLM 판단이 필요한가"를 판단해 불필요한 LLM 호출을 건너뛸 수 있다
+            # (액션 실행 중엔 control_loop가 LLM 없이 자율 진행하므로 새 판단이 불필요).
+            'decision_needed': self.current_action is None,
             'current_action': self.current_action,
             'action_elapsed_sec': round(self.action_elapsed, 1) if self.current_action else 0,
+            # 압축 상태(blackboard) - 대화가 짧게 끊겨도 이전 판단 이력을 알 수 있게
+            'last_action': self.last_action,
+            'last_action_result': self.last_action_result,
+            'retry_count': self.action_retry_count,
             'position': {
                 'x': round(self.boat.position[0], 1),
                 'y': round(self.boat.position[1], 1),

@@ -5,6 +5,13 @@ KABOAT 미션 프롬프트 생성기
 LLM에게 제공할 시스템 프롬프트와 상황 컨텍스트를 생성합니다.
 멀티모달 입력(카메라 이미지 + LiDAR 데이터 + 텍스트)과 함께 사용됩니다.
 """
+import sys
+
+try:
+    from config import settings as SETTINGS
+except ImportError:
+    sys.path.insert(0, '/home/yune/vrx_ws/src/kaboat_autonomous')
+    from config import settings as SETTINGS
 
 # 미션별 카메라(색상/마커 인식) 필요 여부 - VISION_GUIDE 포함 여부 결정
 MISSION_NEEDS_CAMERA = {
@@ -15,9 +22,44 @@ MISSION_NEEDS_CAMERA = {
     'docking': True,
 }
 
+# 카메라 확인을 시작할 psi_error 임계값 (반시야각 - 여유분). 이 값보다
+# |psi_error_deg|가 작아지면 타깃이 실제로 프레임에 들어왔을 가능성이 높다.
+_CAMERA_CHECK_TRIGGER_DEG = SETTINGS.CAMERA_HALF_FOV_DEG - SETTINGS.CAMERA_CHECK_MARGIN_DEG
+
+
+# --- LLM 프롬프트용 헬퍼 함수 ---
+
+def _format_front_distribution(front_dist: list) -> str:
+    """전방 장애물 분포를 LLM이 이해하기 쉬운 텍스트로 변환"""
+    if not front_dist:
+        return "  (데이터 없음)"
+    lines = []
+    for s in front_dist:
+        dist_str = f"{s['distance']:.1f}m" if s.get('distance') is not None else "없음"
+        lines.append(f"  {s['sector']}: {dist_str}")
+    return "\n".join(lines)
+
+
+def _format_clusters(clusters: list) -> str:
+    """클러스터 정보를 LLM이 추론/참조하기 쉽게 포맷"""
+    if not clusters:
+        return "  (클러스터 없음)"
+    lines = []
+    for c in clusters:
+        cid = c.get('id', '?')
+        angle = c.get('angle', 0)
+        dist = c.get('distance', 0)
+        rejected = c.get('rejected', False)
+        status = " [거부됨]" if rejected else ""
+        direction = "좌" if angle > 0 else "우" if angle < 0 else "정면"
+        lines.append(f"  id={cid}: {direction}{abs(angle):.0f}° @ {dist:.1f}m{status}")
+    return "\n".join(lines)
+
 # 항상 포함되는 핵심 프롬프트: 모듈 스키마 + LiDAR 규약 + 응답 형식만.
 # 미션별 수행 전략은 generate_mission_context()가 담당하므로 여기서 중복 나열하지 않는다.
-CORE_PROMPT = """# KABOAT 자율주행 미션 수행 시스템
+# (JSON 예시에 중괄호가 많아 f-string으로 통째로 만들면 깨지므로, 값이 필요한
+# 조각만 별도 f-string으로 만들어 아래에서 문자열 연결한다.)
+CORE_PROMPT_BODY = """# KABOAT 자율주행 미션 수행 시스템
 
 당신은 KABOAT 자율주행 보트의 미션 컨트롤러입니다.
 센서 데이터를 분석하고, 적절한 모듈을 호출하여 미션을 수행합니다.
@@ -31,6 +73,12 @@ CORE_PROMPT = """# KABOAT 자율주행 미션 수행 시스템
 
 // 직진 항법 (장애물 회피 없음, 짧은 거리/클리어 경로용)
 {"action": "navigate_direct", "goal_x": 10.0, "goal_y": 20.0}
+
+// 직진 항법 + 헤딩 고정 (hold_heading 지정 시 목표 방향 계산 대신
+// 해당 헤딩을 그대로 유지하며 직진 - 게이트 중심선처럼 정렬된 방향을
+// 흐트러뜨리지 않고 똑바로 나아가야 할 때 사용. goal_x/goal_y는
+// 도달 판정/감속 거리 계산용으로 계속 필요)
+{"action": "navigate_direct", "goal_x": 10.0, "goal_y": 20.0, "hold_heading": 45.0}
 ```
 
 ### 기동 모듈
@@ -40,6 +88,10 @@ CORE_PROMPT = """# KABOAT 자율주행 미션 수행 시스템
 
 // 헤딩 정렬 (특정 방향으로 정렬, 전진 없음) - 탐색 시 dorodori보다 우선 사용
 {"action": "align", "heading": 90.0, "tolerance": 5.0, "timeout": 10.0}
+
+// 클러스터 기준 정렬 (LiDAR 클러스터 id로 해당 물체 방향으로 정렬)
+// 카메라로 인식한 부표가 있고 LiDAR 클러스터와 매칭될 때 사용
+{"action": "align_to_cluster", "cluster_id": 0, "tolerance": 5.0, "timeout": 10.0}
 
 // 좌우 스캔 (align으로 정렬할 클러스터가 없을 때의 광역 탐색 폴백)
 {"action": "dorodori", "center_heading": 45.0, "duration": 8.0, "half_range": 30.0}
@@ -67,6 +119,9 @@ CORE_PROMPT = """# KABOAT 자율주행 미션 수행 시스템
 
 // 상황 분석 요청 (LiDAR 요약 반환)
 {"action": "analyze"}
+
+// 클러스터가 타깃이 아님을 기록 (전역 좌표로 저장, 재탐색 방지)
+{"action": "reject_cluster", "angle": 42.5, "distance": 10.0, "reason": "not_green_buoy"}
 ```
 
 ## LiDAR 인덱스 규약
@@ -85,12 +140,15 @@ CORE_PROMPT = """# KABOAT 자율주행 미션 수행 시스템
 (가까운 순 정렬, 최대 3개)
 
 탐색이 필요할 때:
-1. `clusters`가 비어있지 않으면 → 가장 가까운(첫 번째) 클러스터를 목표로
-   `align` 실행. `heading = 현재 헤딩(IMU) + cluster.center_angle` (정규화, -180~180)
-2. 정렬 완료 후 카메라로 실제 부표/도킹 마커인지 확인
+1. `clusters`에서 `rejected: true`인 항목은 건너뛴다 (이미 카메라로 확인해서
+   타깃이 아니라고 판정된 곳 - 세션이 끊겨도 유지되는 기록이므로 재시도 불필요)
+2. 남은 클러스터 중 가장 가까운 것을 목표로 `align` 실행.
+   `heading = 현재 헤딩(IMU) + cluster.center_angle` (정규화, -180~180)
+3. 정렬 완료 후 카메라로 실제 부표/도킹 마커인지 확인
    - 맞으면 해당 미션 절차 진행
-   - 아니면 다음 순위 클러스터로 재시도, 그래도 없으면 3번
-3. `clusters`가 비어있거나 후보가 모두 아니면 → `dorodori`로 광역 스캔
+   - 아니면 `reject_cluster`로 기록한 뒤 다음 순위 클러스터로 재시도,
+     그래도 없으면 4번
+4. 쓸 클러스터가 없으면(전부 rejected거나 비어있음) → `dorodori`로 광역 스캔
    (dorodori는 클러스터 없을 때만 쓰는 폴백. clusters가 있는데 바로
    dorodori부터 쓰지 말 것 - 이미 방향을 아는데 광역 스윕은 비효율적)
 
@@ -105,6 +163,23 @@ CORE_PROMPT = """# KABOAT 자율주행 미션 수행 시스템
 2. `clusters` 확인 후 있으면 `align`, 없으면 `dorodori`로 새 경로 탐색
 3. 다른 방향으로 `navigate_avoid`
 
+## 폴링 시 decision_needed 확인
+`/action_status`, `/sensor_fusion`의 `decision_needed`가 `false`면 진행 중인
+액션이 아직 끝나지 않아 control_loop가 LLM 없이 자율 진행 중이라는 뜻이다.
+이때는 새 액션을 선택하지 말고, 다음 폴링까지 대기만 하라 (불필요한 판단/
+새 action 호출로 진행 중인 기동을 중단시키지 말 것). `decision_needed: true`
+(액션 완료, stuck 등)일 때만 본격적으로 상황을 분석해 다음 액션을 결정한다.
+
+## 압축 상태(blackboard) - 대화가 짧게 끊겨도 유지됨
+`last_action`/`last_action_result`/`retry_count`는 action_dispatcher 노드가
+미션 내내 들고 있는 최소 이력이다 (LLM 대화 자체가 새로 시작돼도 이 값들은
+안 사라짐). 매 판단 시 확인할 것:
+- `last_action_result`가 실패류(`timeout`, `failed_no_lidar`)면 방금 시도가
+  왜 실패했는지 먼저 고려하고 같은 방식을 그대로 반복하지 말 것
+- `retry_count[action]`이 2 이상이면 그 액션을 계속 쓰지 말고 다른 접근으로
+  전환 (예: align이 계속 timeout → dorodori로 전환, orbit이 계속
+  failed_no_lidar → 더 가까이 접근 후 재시도)
+
 ## 응답 형식
 
 상황을 분석한 후, 다음 액션을 JSON으로 출력하세요:
@@ -116,6 +191,38 @@ CORE_PROMPT = """# KABOAT 자율주행 미션 수행 시스템
 }
 ```
 """
+
+# JSON 예시의 중괄호와 섞이지 않도록 별도 f-string으로 만들어 CORE_PROMPT_BODY에
+# 삽입한다 (값이 SETTINGS에서 오므로 하드코딩 드리프트 방지).
+_CAMERA_TIMING_SECTION = f"""## 카메라 확인 타이밍 (align 중 언제 사진을 찍을지)
+카메라는 전방 1대(`/wamv/sensors/camera/image_raw`), 반시야각 ≈ {SETTINGS.CAMERA_HALF_FOV_DEG:.0f}°다.
+`cluster.center_angle`은 보트 기준 상대각이라 카메라 중심(보트 정면)과 바로
+비교 가능 - `|center_angle| < {SETTINGS.CAMERA_HALF_FOV_DEG:.0f}°`면 지금 카메라
+시야 안에 있다는 뜻이다.
+
+- align을 막 시작했는데 타깃이 반시야각보다 먼 각도에 있었다면, 그 시점에는
+  카메라를 보지 말 것 (아직 프레임 밖일 가능성이 높아 헛촬영이다 - align은
+  애초에 "카메라에 안 보이니 보일 만한 각도로 도는" 동작임을 기억할 것)
+- align 진행 중에는 `/sensor_fusion`의 `command.psi_error_deg`(실시간 조향
+  오차, 새 판단 없이 그냥 확인 가능)를 지켜보다가 `|psi_error_deg| < {_CAMERA_CHECK_TRIGGER_DEG:.0f}°`
+  (반시야각에서 여유분을 뺀 값 - 렌즈 가장자리 왜곡/부분 프레임 회피)로
+  줄어드는 순간부터 `subscribe_once`로 카메라 확인을 시작한다. 그 전까지는
+  새 액션 호출 없이 대기만 한다 (헛촬영/토큰 낭비 방지)
+- 회전각이 애초에 작아 시작부터 이미 `|center_angle| < {_CAMERA_CHECK_TRIGGER_DEG:.0f}°`인
+  클러스터라면 align 시작과 거의 동시에 확인해도 된다 (남은 정렬 시간과
+  이미지 판단을 겹쳐서 처리 - 실제로 대기시간이 줄어드는 유일한 구간)
+
+## 한 프레임에 여러 클러스터 묶어 처리
+카메라를 확인할 때 `clusters` 목록에서 목표 클러스터 외에도
+`|center_angle| < {SETTINGS.CAMERA_HALF_FOV_DEG:.0f}°`인 다른 후보가 있으면
+같은 사진에 함께 보일 가능성이 높다. 그런 후보가 있으면 별도로 align+촬영을
+반복하지 말고 한 번의 촬영/분석으로 같이 판별한다 (타깃이 아닌 것으로
+확인되면 각각 `reject_cluster`로 기록해 재탐색을 막는다)
+"""
+
+CORE_PROMPT = CORE_PROMPT_BODY.replace(
+    "## LiDAR 데이터 분석 시", _CAMERA_TIMING_SECTION + "## LiDAR 데이터 분석 시"
+)
 
 # 카메라(색상/마커 인식)가 필요한 미션에만 포함하는 조각.
 # gate_search/buoy_orbit/docking 전용, hopping_tour/obstacle_course에는 불필요.
@@ -130,6 +237,29 @@ VISION_GUIDE = """## 색상-부표 규약 (본 코스 실측 기준, IALA와 반
 - 화면 중앙 = 정면(0°), 왼쪽 = 좌현(+), 오른쪽 = 우현(-)
 - 화면 X 좌표를 LiDAR 각도로 변환: `lidar_angle = (320 - image_x) / 320 * 60`
   - 예: x=160 (왼쪽 1/4) → +30° / x=480 (오른쪽 1/4) → -30° (idx=330)
+
+## 카메라-LiDAR 융합 추론 (핵심!)
+
+**센서 개별로도 추론 가능, 함께 보면 더 정확:**
+
+1. **카메라만 있을 때**: 부표 색상/위치로 게이트 구조 파악
+   - 녹색(좌)·적색(우) 쌍이 보이면 → 그 사이가 통과 경로
+   - 부표 화면 X 좌표 → LiDAR 각도로 변환하여 `gate_pass` 호출
+
+2. **LiDAR만 있을 때**: `front_distribution`에서 패턴 추론
+   - 좌우 대칭적으로 가까운 거리의 물체가 있고, 정면은 비어있다면 → 게이트 패턴
+   - 예: 좌30°에 8m, 우30°에 9m, 정면은 없음 → 두 부표 사이로 지나갈 수 있음
+
+3. **융합 추론 (권장)**: 카메라 인식 + LiDAR 거리
+   - 카메라에서 녹색 부표가 화면 왼쪽에 → `front_distribution` 좌측 섹터에 물체
+   - 이 매칭이 확인되면 해당 LiDAR 클러스터 = 녹색 부표
+   - `align_to_cluster`로 특정 부표에 정렬 가능
+
+**게이트 통과 판단**:
+- 결정론적 `gate_detected`를 쓰지 않음 - 당신이 직접 판단하세요
+- `front_distribution`에서 "좌우에 물체, 정중앙 비어있음" 패턴이면 통과 가능
+- 카메라에서 색상 확인까지 되면 확신을 갖고 `gate_pass` 실행
+- 장애물 회피가 부표를 피하려 할 때: 부표 사이 공간이 충분하면 직진 명령으로 override
 """
 
 
@@ -257,6 +387,8 @@ def generate_full_prompt(mission_type: str, params: dict = None,
 # LLM에게 보낼 상태 요약 생성
 def format_status_for_llm(status: dict, lidar_summary: dict) -> str:
     """LLM에게 보낼 텍스트 상태 요약"""
+    front_dist = _format_front_distribution(lidar_summary.get('front_distribution', []))
+    clusters = _format_clusters(lidar_summary.get('clusters', []))
     return f"""
 ## 현재 보트 상태
 
@@ -266,16 +398,22 @@ def format_status_for_llm(status: dict, lidar_summary: dict) -> str:
 ## LiDAR 요약
 
 전방 클리어: {lidar_summary.get('front_clear', 'unknown')}
-게이트 감지: {lidar_summary.get('gate_detected', False)}
 가장 가까운 장애물: {lidar_summary.get('closest_obstacle', {})}
-클러스터: {lidar_summary.get('clusters', [])}
+
+### 전방 장애물 분포 (직접 판단하세요)
+{front_dist}
+
+### 클러스터 (align_to_cluster로 정렬 가능)
+{clusters}
 
 ## 현재 액션
 
 액션: {status.get('current_action', 'none')}
 경과 시간: {status.get('action_elapsed_sec', 0)}초
+이전 액션 결과: {status.get('last_action', 'none')} → {status.get('last_action_result', 'none')}
+재시도 횟수: {status.get('retry_count', {})}
 
-다음에 수행할 액션을 JSON으로 출력하세요.
+다음에 수행할 액션을 JSON으로 출력하세요. 게이트 통과 여부는 front_distribution 패턴으로 직접 추론하세요.
 """
 
 
@@ -303,15 +441,21 @@ def format_sensor_data_for_llm(gps: dict, imu: dict, lidar_summary: dict,
 - 전방 클리어: {lidar_summary.get('front_clear', 'unknown')}
 - 좌현 클리어: {lidar_summary.get('left_clear', 'unknown')}
 - 우현 클리어: {lidar_summary.get('right_clear', 'unknown')}
-- 게이트 감지: {lidar_summary.get('gate_detected', False)}
 - 가장 가까운 장애물: {lidar_summary.get('closest_obstacle', {}).get('distance', 999):.1f}m @ {lidar_summary.get('closest_obstacle', {}).get('angle', 0)}°
 - 장애물 개수: {lidar_summary.get('obstacle_count', 0)}개
-- 클러스터(탐색 후보, 가까운 순): {lidar_summary.get('clusters', [])}
+
+### 전방 장애물 분포 (LiDAR, 카메라와 대조하여 추론하세요)
+{_format_front_distribution(lidar_summary.get('front_distribution', []))}
+
+### 클러스터 (id로 참조 가능, align_to_cluster 액션 지원)
+{_format_clusters(lidar_summary.get('clusters', []))}
 
 ### 현재 상태
 - 액션: {action_status.get('current_action', 'none')}
 - 경과 시간: {action_status.get('action_elapsed_sec', 0):.1f}초
 - 웨이포인트: {action_status.get('waypoints', {}).get('current', 0)}/{action_status.get('waypoints', {}).get('total', 0)}
+- 이전 액션 결과: {action_status.get('last_action', 'none')} → {action_status.get('last_action_result', 'none')}
+- 재시도 횟수: {action_status.get('retry_count', {})}
 
 ---
 위 센서 데이터와 카메라 이미지를 분석하여 다음 액션을 결정하세요.

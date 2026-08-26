@@ -336,7 +336,8 @@ def navigate_avoid(boat: Boat, goal_x: float, goal_y: float) -> Tuple[float, flo
 
 
 def navigate_direct(boat: Boat, goal_x: float, goal_y: float,
-                    thrust: float = None) -> Tuple[float, float]:
+                    thrust: float = None,
+                    hold_heading: Optional[float] = None) -> Tuple[float, float]:
     """
     장애물 회피 없이 목표 방향으로 직진.
 
@@ -344,11 +345,18 @@ def navigate_direct(boat: Boat, goal_x: float, goal_y: float,
     - "경로가 깨끗하다" / "장애물 없다"
     - 게이트 중간점으로 짧은 거리 이동
     - 정밀 접근 (회피 알고리즘이 오히려 방해될 때)
+    - "각도를 유지한 채 직진" → hold_heading 지정
+      (게이트/도킹처럼 목표점 방향이 아니라 특정 헤딩을 그대로 유지하며
+      전진해야 할 때. 예: 게이트 중심선을 따라 똑바로 진입)
 
     Args:
         boat: 보트 상태
-        goal_x, goal_y: 목표 좌표
+        goal_x, goal_y: 목표 좌표 (도달 판정 및 감속 거리 계산용으로는 항상 사용됨)
         thrust: 추진력 (기본 BASE_CRUISE_THRUST)
+        hold_heading: 유지할 기준 헤딩(도). None이면 기존처럼 목표 좌표 방향으로
+                      조향한다. 지정하면 목표 방향 대신 이 헤딩을 그대로
+                      유지하며 직진한다(호출자가 정렬 완료 후 헤딩을 넘겨주는
+                      방식을 권장).
 
     Returns:
         (psi_error, tau_x)
@@ -360,9 +368,13 @@ def navigate_direct(boat: Boat, goal_x: float, goal_y: float,
     dy = goal_y - boat.position[1]
     dist = np.sqrt(dx ** 2 + dy ** 2)
 
-    # 목표 방향 계산 (ENU: arctan2(dy, dx))
-    goal_heading = np.degrees(np.arctan2(dy, dx))
-    psi_error = normalize_angle(goal_heading - boat.psi)
+    if hold_heading is None:
+        # 목표 방향 계산 (ENU: arctan2(dy, dx))
+        goal_heading = np.degrees(np.arctan2(dy, dx))
+        psi_error = normalize_angle(goal_heading - boat.psi)
+    else:
+        # 목표 방향 대신 지정된 헤딩을 그대로 유지
+        psi_error = normalize_angle(hold_heading - boat.psi)
 
     # 거리에 따른 추력 조절 (가까워지면 감속)
     if dist < SETTINGS.GOAL_RANGE * 2:
@@ -478,6 +490,207 @@ def detect_lidar_clusters(boat: Boat, max_range: float = None, gap_deg: int = No
     return clusters[:max_clusters]
 
 
+class ClusterTracker:
+    """
+    detect_lidar_clusters()는 매 프레임 독립적으로 재계산되어 클러스터가
+    프레임 사이에 끊기거나(gap_deg 경계, 반사 노이즈) 개수/순서가 흔들릴 수
+    있다. 이 트래커는 프레임 간 클러스터를 각도로 연결해(association) 최소
+    연속 프레임(min_hits) 이상 관측된 것만 "안정" 클러스터로 인정하고,
+    일시적으로 놓쳐도(max_misses 이하) 트랙을 유지한다.
+
+    RViz에서 raw vs 안정화 결과를 비교 평가하기 위한 실험용 유틸리티 -
+    analyze_lidar()의 LLM 파이프라인에는 아직 연결하지 않음 (cluster_visualizer.py 전용).
+    """
+
+    def __init__(self, match_angle_tol: float = None, min_hits: int = None,
+                 max_misses: int = None):
+        self.match_angle_tol = (SETTINGS.CLUSTER_MATCH_ANGLE_TOL
+                                 if match_angle_tol is None else match_angle_tol)
+        self.min_hits = SETTINGS.CLUSTER_MIN_HITS if min_hits is None else min_hits
+        self.max_misses = SETTINGS.CLUSTER_MAX_MISSES if max_misses is None else max_misses
+        self.tracks: List[dict] = []  # 각 원소: cluster 필드 + hits/misses
+
+    def update(self, raw_clusters: List[dict]) -> List[dict]:
+        """새 프레임의 raw 클러스터를 기존 트랙과 매칭/갱신하고,
+        min_hits 이상 연속 관측된 안정 클러스터 리스트를 (가까운 순) 반환."""
+        matched = set()
+        for c in raw_clusters:
+            best_i, best_diff = None, None
+            for i, t in enumerate(self.tracks):
+                if i in matched:
+                    continue
+                diff = abs(normalize_angle(c['center_angle'] - t['center_angle']))
+                if diff <= self.match_angle_tol and (best_diff is None or diff < best_diff):
+                    best_i, best_diff = i, diff
+
+            if best_i is not None:
+                t = self.tracks[best_i]
+                t.update(c)
+                t['hits'] += 1
+                t['misses'] = 0
+                matched.add(best_i)
+            else:
+                new_track = dict(c)
+                new_track['hits'] = 1
+                new_track['misses'] = 0
+                self.tracks.append(new_track)
+                matched.add(len(self.tracks) - 1)
+
+        for i, t in enumerate(self.tracks):
+            if i not in matched:
+                t['misses'] += 1
+
+        self.tracks = [t for t in self.tracks if t['misses'] <= self.max_misses]
+
+        stable = [
+            {k: v for k, v in t.items() if k not in ('hits', 'misses')}
+            for t in self.tracks if t['hits'] >= self.min_hits
+        ]
+        stable.sort(key=lambda c: c['distance'])
+        return stable
+
+
+def detect_lidar_clusters_3d(points_xyz: np.ndarray, max_range: float = None,
+                              voxel_size: float = None, min_points: int = None,
+                              max_clusters: int = None, z_min: float = None,
+                              z_max: float = None) -> List[dict]:
+    """
+    3D LiDAR 포인트클라우드(x,y,z, 센서 기준 로컬 좌표) 기반 클러스터링.
+    detect_lidar_clusters()(2D LaserScan, 각도 간격 기반)와는 별개 - z를 함께
+    걸러 수면 반사/자기구조물을 배제할 수 있고, 각도 하나로는 구분 안 되는
+    물체를 x-y 격자(voxel) 인접성으로 더 정확히 묶을 수 있다.
+
+    알고리즘: x-y 평면을 voxel_size 크기 격자로 나눠 포인트를 셀에 배정하고,
+    점유된 셀들을 8-연결(인접 셀 공유)로 묶어 connected components를 구한다
+    (Euclidean/voxel 클러스터링 - PCL 등에서 흔히 쓰는 방식).
+
+    Args:
+        points_xyz: (N, 3) 배열, 센서 로컬 좌표 (x=전방, y=좌현, z=위)
+        max_range: 클러스터 탐색 최대 수평 거리 (기본 SETTINGS.CLUSTER3D_MAX_RANGE)
+        voxel_size: 격자 셀 크기, m (기본 SETTINGS.CLUSTER3D_VOXEL_SIZE)
+        min_points: 노이즈 제외 최소 포인트 수 (기본 SETTINGS.CLUSTER3D_MIN_POINTS)
+        max_clusters: 반환할 최대 클러스터 수 (기본 SETTINGS.CLUSTER3D_MAX_COUNT)
+        z_min, z_max: 이 범위 밖 점은 무시 (기본 SETTINGS.CLUSTER3D_Z_MIN/MAX)
+
+    Returns:
+        가까운 순 정렬된 클러스터 리스트. 각 원소:
+        {'center_angle': 도(LiDAR idx 컨벤션과 동일, atan2(y,x)),
+         'distance': 중심까지 수평 거리(m), 'width_deg': 각폭 근사,
+         'point_count': 포인트 수, 'z': 클러스터 중심 높이(m)}
+    """
+    if max_range is None:
+        max_range = SETTINGS.CLUSTER3D_MAX_RANGE
+    if voxel_size is None:
+        voxel_size = SETTINGS.CLUSTER3D_VOXEL_SIZE
+    if min_points is None:
+        min_points = SETTINGS.CLUSTER3D_MIN_POINTS
+    if max_clusters is None:
+        max_clusters = SETTINGS.CLUSTER3D_MAX_COUNT
+    if z_min is None:
+        z_min = SETTINGS.CLUSTER3D_Z_MIN
+    if z_max is None:
+        z_max = SETTINGS.CLUSTER3D_Z_MAX
+
+    pts = np.asarray(points_xyz, dtype=float)
+    if pts.ndim != 2 or pts.shape[0] == 0:
+        return []
+
+    finite = np.all(np.isfinite(pts), axis=1)
+    x, y, z = pts[finite, 0], pts[finite, 1], pts[finite, 2]
+    r_xy = np.hypot(x, y)
+    valid = (r_xy >= SETTINGS.MIN_VALID_RANGE) & (r_xy < max_range) & (z >= z_min) & (z <= z_max)
+    x, y, z = x[valid], y[valid], z[valid]
+    if len(x) == 0:
+        return []
+
+    cell_x = np.floor(x / voxel_size).astype(int)
+    cell_y = np.floor(y / voxel_size).astype(int)
+
+    # 점유 셀 -> 소속 포인트 인덱스
+    cell_points: dict = {}
+    for i, cell in enumerate(zip(cell_x, cell_y)):
+        cell_points.setdefault(cell, []).append(i)
+
+    # 점유 셀들을 8-연결로 묶는 connected components (BFS)
+    visited = set()
+    clusters = []
+    for cell in cell_points:
+        if cell in visited:
+            continue
+        stack = [cell]
+        visited.add(cell)
+        group_cells = []
+        while stack:
+            c = stack.pop()
+            group_cells.append(c)
+            cx, cy = c
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    nb = (cx + dx, cy + dy)
+                    if nb in cell_points and nb not in visited:
+                        visited.add(nb)
+                        stack.append(nb)
+
+        idxs = [i for c in group_cells for i in cell_points[c]]
+        if len(idxs) < min_points:
+            continue
+
+        gx, gy, gz = x[idxs], y[idxs], z[idxs]
+        cx_mean, cy_mean, cz_mean = float(gx.mean()), float(gy.mean()), float(gz.mean())
+        angles = np.degrees(np.arctan2(gy, gx))
+        width_deg = float(angles.max() - angles.min()) if len(idxs) > 1 else 0.0
+
+        clusters.append({
+            'center_angle': round(float(normalize_angle(np.degrees(np.arctan2(cy_mean, cx_mean)))), 1),
+            'distance': round(float(np.hypot(cx_mean, cy_mean)), 1),
+            'width_deg': round(width_deg, 1),
+            'point_count': len(idxs),
+            'z': round(cz_mean, 2),
+        })
+
+    clusters.sort(key=lambda c: c['distance'])
+    return clusters[:max_clusters]
+
+
+# ============================================================
+# 8.5. 클러스터 거부 기록 (rejected clusters) - 세션이 끊겨도 유지되는 압축 상태
+# ============================================================
+# 대화 컨텍스트를 매 판단마다 짧게 끊어도(bounded-context), "이 방향은 카메라로
+# 확인했더니 타깃이 아니었다"는 사실만은 잃지 않도록 한다. 원본 대화 로그 대신
+# 전역 좌표 점 하나만 기억하면 충분 (각도는 보트가 움직이면 바뀌지만 위치는 안 바뀜).
+# 이 상태(rejected_points 리스트)는 호출자(action_dispatcher)가 들고 있고,
+# 여기 함수들은 순수 변환/판정만 수행한다.
+
+def reject_cluster_point(boat: Boat, angle: float, distance: float) -> Tuple[float, float]:
+    """각도/거리를 전역 좌표로 변환 (reject_cluster 액션 처리용)."""
+    return lidar_point_to_global(boat, angle, distance)
+
+
+def annotate_cluster_rejection(boat: Boat, clusters: List[dict], rejected_points: List[dict],
+                                radius: float = None) -> List[dict]:
+    """
+    각 클러스터에 이미 '타깃 아님'으로 확인된 지점 근처인지 'rejected' 플래그로 표시.
+
+    Args:
+        clusters: detect_lidar_clusters() 결과
+        rejected_points: [{'x':.., 'y':..}, ...] 전역 좌표 (호출자가 상태로 보관)
+        radius: 같은 지점으로 볼 거리(m) 허용 오차 (기본 SETTINGS.REJECT_CLUSTER_RADIUS_M)
+    """
+    if radius is None:
+        radius = SETTINGS.REJECT_CLUSTER_RADIUS_M
+    annotated = []
+    for c in clusters:
+        gx, gy = lidar_point_to_global(boat, c['center_angle'], c['distance'])
+        is_rejected = any(
+            (gx - r['x']) ** 2 + (gy - r['y']) ** 2 < radius ** 2
+            for r in rejected_points
+        )
+        annotated.append({**c, 'rejected': is_rejected})
+    return annotated
+
+
 def analyze_lidar(boat: Boat) -> dict:
     """
     LiDAR 데이터 요약 (LLM이 상황 판단에 사용).
@@ -512,15 +725,46 @@ def analyze_lidar(boat: Boat) -> dict:
         closest_angle = int(valid_indices[min_idx])
         closest_dist = float(valid_dists[min_idx])
 
-    # 게이트 패턴 감지 (양쪽에 대칭적 장애물)
-    gate_detected = False
-    left_obs = scan[20:70]
-    right_obs = scan[290:340]
-    left_valid = left_obs[(left_obs > 0) & (left_obs < 20)]
-    right_valid = right_obs[(right_obs > 0) & (right_obs < 20)]
-    if len(left_valid) > 0 and len(right_valid) > 0:
-        if abs(np.min(left_valid) - np.min(right_valid)) < 5:
-            gate_detected = True
+    # 전방 장애물 분포 (LLM이 직접 추론할 수 있게 raw 데이터 제공)
+    # -60° ~ +60° 범위를 6개 섹터로 나눠 각 섹터의 최소 거리 제공
+    # 양수 = 좌측, 음수 = 우측 (카메라 관점과 일치)
+    front_sectors = []
+    for sector_idx in range(6):
+        angle_start = -60 + sector_idx * 20
+        angle_end = angle_start + 20
+        angle_center = angle_start + 10
+
+        # scan 배열 인덱스: 0=정면, 90=좌측, 270=우측
+        idx_start = int((360 + angle_start) % 360) if angle_start < 0 else int(angle_start)
+        idx_end = int((360 + angle_end) % 360) if angle_end < 0 else int(angle_end)
+
+        if idx_start > idx_end:
+            indices = list(range(idx_end, idx_start + 1))
+        else:
+            indices = list(range(idx_start, idx_end + 1))
+
+        sector_scan = scan[indices]
+        sector_valid = sector_scan[(sector_scan > 0) & (sector_scan < SETTINGS.LIDAR_MAX_RANGE)]
+
+        if len(sector_valid) > 0:
+            min_dist = float(np.min(sector_valid))
+            front_sectors.append({
+                'sector': f"{'좌' if angle_center > 0 else '우' if angle_center < 0 else '정면'}{abs(angle_center)}°",
+                'angle': angle_center,
+                'distance': round(min_dist, 1)
+            })
+        else:
+            front_sectors.append({
+                'sector': f"{'좌' if angle_center > 0 else '우' if angle_center < 0 else '정면'}{abs(angle_center)}°",
+                'angle': angle_center,
+                'distance': None
+            })
+
+    # 클러스터 정보 (LLM이 대상 물체로 정렬 가능하게 상세 정보)
+    clusters = detect_lidar_clusters(boat)
+    # 클러스터에 ID 부여 (LLM이 참조 가능)
+    for i, c in enumerate(clusters):
+        c['id'] = i
 
     return {
         'front_clear': bool(sector_clear(350, 370, 10.0) and sector_clear(0, 10, 10.0)),
@@ -530,7 +774,7 @@ def analyze_lidar(boat: Boat) -> dict:
             'angle': int(closest_angle),
             'distance': round(float(closest_dist), 1)
         },
-        'gate_detected': bool(gate_detected),
+        'front_distribution': front_sectors,
         'obstacle_count': int(np.sum(valid)),
-        'clusters': detect_lidar_clusters(boat)
+        'clusters': clusters
     }
