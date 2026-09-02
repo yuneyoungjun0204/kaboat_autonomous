@@ -449,9 +449,9 @@ class ActionDispatcher(Node):
 
         if cluster_id < len(clusters):
             cluster = clusters[cluster_id]
-            self.action_params['target_angle'] = cluster['angle']
+            self.action_params['target_angle'] = cluster['center_angle']
             self.get_logger().info(
-                f'align_to_cluster: id={cluster_id} → angle={cluster["angle"]:.1f}°'
+                f'align_to_cluster: id={cluster_id} → angle={cluster["center_angle"]:.1f}°'
             )
         else:
             self.get_logger().warn(f'align_to_cluster: id={cluster_id} not found')
