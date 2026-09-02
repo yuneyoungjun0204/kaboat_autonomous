@@ -19,7 +19,8 @@ LLM(ros-mcp)이 /llm_action 토픽으로 JSON 명령을 보내면
 """
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import NavSatFix, Imu, LaserScan
+from sensor_msgs.msg import NavSatFix, Imu, LaserScan, PointCloud2
+from sensor_msgs_py import point_cloud2 as pc2
 from std_msgs.msg import Float32MultiArray, String
 from geometry_msgs.msg import PointStamped
 import numpy as np
@@ -80,6 +81,12 @@ class ActionDispatcher(Node):
         self.align_settle_count = 0  # align이 tolerance 이내에 연속으로 머문 틱 수
         self.yaw_rate_deg = 0.0      # IMU 기반 실제 요(yaw) 각속도 (도/초)
 
+        # 3D 포인트클라우드 (클러스터링 우선 소스) - 신선하지 않으면(끊김 등)
+        # lidar_callback에서 자동으로 2D LaserScan 클러스터링으로 폴백
+        self.points_3d = None
+        self.points_3d_time = None
+        self._points_3d_fallback_logged = False
+
         # === 압축 상태(blackboard) ===
         # LLM 대화를 매 판단마다 짧게 끊어도(bounded-context) "방금 뭘 했는지,
         # 뭐가 실패했는지, 이미 아니라고 확인된 방향"을 잃지 않도록 이 노드
@@ -88,6 +95,17 @@ class ActionDispatcher(Node):
         self.last_action_result = None
         self.action_retry_count = {}   # {action_name: 연속 실패 횟수}
         self.rejected_clusters = []    # [{'x':.., 'y':.., 'reason':..}, ...] 전역 좌표
+
+        # === 미션 단계 자동 전환(FSM) ===
+        # settings.MISSION_SEQUENCE를 따라 순수 이동 구간(requires_llm=False)은
+        # 도착 즉시 스스로 다음 지점으로 navigate_avoid를 발행한다. 비전이
+        # 필요한 지점(requires_llm=True)에 도착하면 멈추고 LLM에게 넘기며,
+        # LLM은 그 작업을 마치면 'mission_phase_done'을 호출해야 다음 자동
+        # 구간이 재개된다. 'mission_auto_pause'/'mission_auto_resume'으로
+        # 언제든 자동 진행을 멈추고 수동 개입할 수 있다.
+        self.mission_phase_idx = 0
+        self.mission_auto_enabled = True
+        self._mission_waypoints_local = SETTINGS.get_mission_waypoints_local()  # [(x,y,name,desc,requires_llm), ...]
 
         # === Publishers ===
         self.cmd_pub = self.create_publisher(Float32MultiArray, '/command', 10)
@@ -99,6 +117,7 @@ class ActionDispatcher(Node):
         self.create_subscription(NavSatFix, '/wamv/sensors/gps/fix', self.gps_callback, 10)
         self.create_subscription(Imu, '/wamv/sensors/imu/data', self.imu_callback, 10)
         self.create_subscription(LaserScan, '/wamv/sensors/lidar/scan', self.lidar_callback, 10)
+        self.create_subscription(PointCloud2, '/wamv/sensors/lidar/points', self.points_callback, 10)
         self.create_subscription(String, '/llm_action', self.action_callback, 10)
 
         # 제어 루프 (10Hz)
@@ -127,6 +146,23 @@ class ActionDispatcher(Node):
         # 실측: 목표 116°에서 141.8°까지 밀려난 뒤에야 정지).
         self.yaw_rate_deg = np.degrees(msg.angular_velocity.z)
 
+    def points_callback(self, msg: PointCloud2):
+        """3D 포인트클라우드 수신 - 클러스터링 우선 소스로 저장.
+        analyze_lidar()가 boat.scan(2D)과 별개로 이 데이터를 우선 사용한다
+        (신선할 때만 - lidar_callback에서 staleness 판단)."""
+        points = pc2.read_points(msg, field_names=('x', 'y', 'z'), skip_nans=False)
+        if len(points) == 0:
+            return
+        self.points_3d = np.column_stack([
+            points['x'].astype(np.float64).ravel(),
+            points['y'].astype(np.float64).ravel(),
+            points['z'].astype(np.float64).ravel(),
+        ])
+        self.points_3d_time = time.time()
+        if self._points_3d_fallback_logged:
+            self.get_logger().info('[Cluster] PointCloud2 복구됨 - 3D 클러스터링으로 복귀')
+            self._points_3d_fallback_logged = False
+
     def lidar_callback(self, msg: LaserScan):
         ranges = np.array(msg.ranges)
         ranges = np.nan_to_num(ranges, nan=0.0, posinf=0.0)
@@ -141,8 +177,20 @@ class ActionDispatcher(Node):
 
         self.boat.scan = ranges.tolist()
 
+        # 3D 포인트클라우드가 신선하면 클러스터링에 우선 사용, 아니면 2D 폴백
+        # (cluster_visualizer.py의 3D 우선/2D 폴백 방식을 실제 미션 파이프라인에도 적용)
+        points_3d = None
+        if self.points_3d is not None and (time.time() - self.points_3d_time) <= SETTINGS.CLUSTER3D_STALE_SEC:
+            points_3d = self.points_3d
+        elif not self._points_3d_fallback_logged:
+            self.get_logger().warn(
+                f'[Cluster] PointCloud2가 {SETTINGS.CLUSTER3D_STALE_SEC}초 이상 안 들어옴 - '
+                '2D LaserScan 클러스터링으로 폴백'
+            )
+            self._points_3d_fallback_logged = True
+
         # LiDAR 요약 발행 (LLM 판단용) - 거부 기록된 클러스터는 rejected:true로 표시
-        summary = maneuvers.analyze_lidar(self.boat)
+        summary = maneuvers.analyze_lidar(self.boat, points_3d=points_3d)
         summary['clusters'] = maneuvers.annotate_cluster_rejection(
             self.boat, summary['clusters'], self.rejected_clusters
         )
@@ -179,24 +227,165 @@ class ActionDispatcher(Node):
                 self._init_orbit(cmd)
             elif action == 'gate_pass':
                 self._init_gate_pass(cmd)
+            elif action == 'pass_between_clusters':
+                self._init_pass_between_clusters(cmd)
             elif action == 'waypoints':
                 self._init_waypoints(cmd)
             elif action == 'stop':
                 self._stop()
+            elif action == 'dorodori':
+                self._init_dorodori(cmd)
             elif action == 'align':
                 self.align_settle_count = 0  # 정착 카운터 리셋
             elif action == 'align_to_cluster':
                 self.align_settle_count = 0
                 self._init_align_to_cluster(cmd)
+            elif action == 'advance_bearing':
+                self._init_advance_bearing(cmd)
             elif action == 'analyze':
                 self._publish_analysis()
                 self.current_action = None
             elif action == 'reject_cluster':
                 self._reject_cluster(cmd)
                 self.current_action = None
+            elif action == 'mission_phase_done':
+                self._mission_phase_done()
+                self.current_action = None
+            elif action == 'mission_auto_pause':
+                self.mission_auto_enabled = False
+                self.get_logger().info('[Mission] auto-transit paused')
+                self.current_action = None
+            elif action == 'mission_auto_resume':
+                self.mission_auto_enabled = True
+                self.get_logger().info('[Mission] auto-transit resumed')
+                self.current_action = None
+            elif action == 'set_goal_range':
+                new_range = float(cmd.get('value', 5.0))
+                new_range = max(1.0, min(25.0, new_range))  # 1-25 범위 제한
+                SETTINGS.GOAL_RANGE = new_range
+                self.get_logger().info(f'[Settings] GOAL_RANGE = {new_range}m')
+                self.current_action = None
+            elif action == 'set_speed':
+                new_speed = float(cmd.get('value', 5.0))
+                new_speed = max(1.0, min(10.0, new_speed))  # 1-10 범위 제한
+                SETTINGS.SPEED_MULTIPLIER = new_speed
+                self.get_logger().info(f'[Settings] SPEED_MULTIPLIER = {new_speed}')
+                self.current_action = None
+            elif action == 'get_settings':
+                self.get_logger().info(
+                    f'[Settings] GOAL_RANGE={SETTINGS.GOAL_RANGE}m, '
+                    f'SPEED_MULTIPLIER={SETTINGS.SPEED_MULTIPLIER}'
+                )
+                self.current_action = None
 
         except json.JSONDecodeError as e:
             self.get_logger().error(f'Invalid JSON: {e}')
+
+    # === 미션 단계 자동 전환(FSM) ===
+
+    def _current_mission_phase(self):
+        """현재 미션 단계 정보. 시퀀스를 다 마쳤으면 None."""
+        if self.mission_phase_idx >= len(self._mission_waypoints_local):
+            return None
+        return self._mission_waypoints_local[self.mission_phase_idx]
+
+    def _mission_phase_status(self) -> dict:
+        """/action_status용 미션 단계 요약."""
+        phase = self._current_mission_phase()
+        return {
+            'index': self.mission_phase_idx,
+            'total': len(self._mission_waypoints_local),
+            'name': phase[2] if phase else None,
+            'requires_llm': phase[4] if phase else None,
+            'auto_enabled': self.mission_auto_enabled,
+        }
+
+    def _mission_waypoint_distance(self) -> float:
+        """현재 미션 웨이포인트까지의 거리 (m)."""
+        phase = self._current_mission_phase()
+        if phase is None:
+            return 0.0
+        x, y = phase[0], phase[1]
+        dx = x - self.boat.position[0]
+        dy = y - self.boat.position[1]
+        return round((dx**2 + dy**2)**0.5, 1)
+
+    def _mission_phase_done(self):
+        """LLM이 비전이 필요한 단계(게이트 통과/부표선회/도킹)를 마쳤을 때
+        호출 - 다음 자동 구간이 재개되도록 인덱스를 전진시킨다."""
+        phase = self._current_mission_phase()
+        if phase is None:
+            self.get_logger().warn('mission_phase_done: 이미 미션 시퀀스 끝')
+            return
+        name, requires_llm = phase[2], phase[4]
+        if not requires_llm:
+            self.get_logger().warn(
+                f"mission_phase_done: 현재 단계 '{name}'는 requires_llm=False라 "
+                "이미 자동 진행 대상임 - 호출 불필요했지만 그대로 전진시킴"
+            )
+        self.mission_phase_idx += 1
+        self.get_logger().info(f"[Mission] phase done: '{name}' → 다음 자동 구간 재개")
+
+    def _check_waypoint_arrival(self):
+        """액션 실행 중에도 웨이포인트 도착 체크 - 도착 시 미션 단계 자동 전환.
+        _maybe_auto_advance_mission은 current_action is None일 때만 호출되므로,
+        외부 LLM 명령 실행 중에는 미션 전환이 안 됨. 이 함수로 보완."""
+        if not self.mission_auto_enabled:
+            return
+
+        phase = self._current_mission_phase()
+        if phase is None:
+            return
+
+        x, y, name, _desc, requires_llm = phase
+
+        if maneuvers.is_goal_reached(self.boat, x, y):
+            if requires_llm:
+                return  # LLM 필요한 단계는 자동 전환 안 함
+            self.get_logger().info(f"[Auto] ✓ Waypoint '{name}' reached during action - advancing phase")
+            self.mission_phase_idx += 1
+
+    def _start_simple_action(self, action: str, params: dict):
+        """init 단계가 필요 없는 액션(navigate_avoid 등)을 코드에서 직접 시작.
+        LLM이 /llm_action으로 보낼 때와 동일한 상태 초기화를 거친다."""
+        self.current_action = action
+        self.action_start_time = time.time()
+        self.action_elapsed = 0.0
+        self.action_params = dict(params, action=action)
+
+    def _maybe_auto_advance_mission(self):
+        """구간 전환 자동화: current_action이 비어있을 때(=decision_needed)
+        매 tick 호출된다. 순수 이동 구간이면 도착할 때까지 스스로
+        navigate_avoid를 발행하고, 이미 도착했으면 다음 구간으로 인덱스를
+        전진시켜 연쇄 진행한다(여러 구간이 연속으로 이미 도착해 있는 경우도
+        한 번에 처리). 비전이 필요한 지점에 도착하면 멈추고 LLM에게 넘긴다."""
+        if not self.mission_auto_enabled:
+            return
+
+        while True:
+            phase = self._current_mission_phase()
+            if phase is None:
+                return  # 미션 시퀀스 끝 - 자동 진행 없음
+
+            x, y, name, _desc, requires_llm = phase
+
+            # 도착 거리 계산
+            dx = x - self.boat.position[0]
+            dy = y - self.boat.position[1]
+            dist = (dx**2 + dy**2)**0.5
+
+            if not maneuvers.is_goal_reached(self.boat, x, y):
+                self._start_simple_action('navigate_avoid', {'goal_x': x, 'goal_y': y})
+                self.get_logger().info(f"[Auto] transit → '{name}' dist={dist:.1f}m (goal={SETTINGS.GOAL_RANGE}m)")
+                return
+
+            # 이미 도착함
+            self.get_logger().info(f"[Auto] ✓ ARRIVED at '{name}' dist={dist:.1f}m < {SETTINGS.GOAL_RANGE}m")
+            if requires_llm:
+                self.get_logger().info(f"[Auto] arrived at '{name}' (vision phase) - LLM에게 넘김")
+                return  # decision_needed=true, LLM이 mission_phase_done 호출할 때까지 대기
+
+            self.mission_phase_idx += 1  # 순수 이동 지점이면 바로 다음 구간 확인 (루프 계속)
 
     # === 압축 상태(blackboard) 기록 ===
 
@@ -268,6 +457,58 @@ class ActionDispatcher(Node):
             self._record_result('gate_pass', 'failed_no_lidar')
             self.current_action = None
 
+    def _init_pass_between_clusters(self, cmd):
+        """2D LiDAR 스캔 두 점 사이 중점 웨이포인트 생성
+
+        ★ 부표길 유지: 직선 통과 (use_avoidance=False)
+        ★ 중점 + 연장점으로 확실히 통과
+
+        Parameters:
+            left_idx: 왼쪽 물체의 LiDAR 스캔 인덱스 (0-360)
+            right_idx: 오른쪽 물체의 LiDAR 스캔 인덱스 (0-360)
+            extend_dist: 통과 후 연장 거리 (기본 10m)
+        """
+        left_idx = cmd.get('left_idx', 315)   # 기본: 왼쪽 315° (= -45°)
+        right_idx = cmd.get('right_idx', 45)  # 기본: 오른쪽 45°
+        extend_dist = cmd.get('extend_dist', 10.0)
+
+        # LiDAR 스캔에서 두 점의 중점 계산
+        wp = maneuvers.midpoint_waypoint_from_scan(self.boat, left_idx, right_idx)
+
+        if wp is None:
+            self.get_logger().warn(
+                f'pass_between: invalid LiDAR idx {left_idx}, {right_idx}'
+            )
+            self._record_result('pass_between_clusters', 'failed_no_lidar')
+            self.current_action = None
+            return
+
+        mid_x, mid_y = wp
+
+        # 보트 → 중점 방향으로 연장점 계산 (확실히 통과하도록)
+        import math
+        boat_x, boat_y = self.boat.position[0], self.boat.position[1]
+        dx = mid_x - boat_x
+        dy = mid_y - boat_y
+        dist_to_mid = math.sqrt(dx*dx + dy*dy)
+
+        if dist_to_mid > 0.1:
+            ux, uy = dx / dist_to_mid, dy / dist_to_mid
+            ext_x = mid_x + ux * extend_dist
+            ext_y = mid_y + uy * extend_dist
+            self.waypoint_queue = [(mid_x, mid_y), (ext_x, ext_y)]
+        else:
+            self.waypoint_queue = [(mid_x, mid_y)]
+
+        self.current_waypoint_idx = 0
+
+        # ★ 부표길 유지: 직선 통과 (장애물 회피 비활성화)
+        self.action_params['use_avoidance'] = False
+
+        self.get_logger().info(
+            f'pass_between: idx[{left_idx}] ↔ idx[{right_idx}] → DIRECT path ({mid_x:.1f}, {mid_y:.1f})'
+        )
+
     def _init_waypoints(self, cmd):
         """웨이포인트 리스트 설정"""
         wps = cmd.get('waypoints', [])
@@ -301,7 +542,11 @@ class ActionDispatcher(Node):
 
     def control_loop(self):
         """10Hz 제어 루프"""
+        # 액션 실행 중에도 웨이포인트 도착 체크 (미션 단계 자동 전환)
+        self._check_waypoint_arrival()
+
         if self.current_action is None:
+            self._maybe_auto_advance_mission()
             return
 
         self.action_elapsed = time.time() - self.action_start_time
@@ -322,7 +567,7 @@ class ActionDispatcher(Node):
             psi_error, tau_x = self._exec_align()
         elif self.current_action == 'align_to_cluster':
             psi_error, tau_x = self._exec_align_to_cluster()
-        elif self.current_action in ('orbit', 'gate_pass', 'waypoints'):
+        elif self.current_action in ('orbit', 'gate_pass', 'pass_between_clusters', 'waypoints'):
             psi_error, tau_x = self._exec_waypoint_follow()
 
         # 명령 발행
@@ -378,10 +623,41 @@ class ActionDispatcher(Node):
 
         return maneuvers.backward(self.boat, hold_heading=hold_heading)
 
+    def _init_dorodori(self, cmd):
+        """도리도리 시작 시 스윕 기준각(center_heading)을 한 번만 고정한다.
+
+        _exec_dorodori가 매 틱 center_heading을 다시 조회하면서 기본값으로
+        self.boat.psi(회전 중인 현재 헤딩)를 썼던 과거 구현은, LLM이
+        center_heading을 생략할 때마다 기준각이 매 틱 최신 헤딩으로 다시
+        잡혀버려 실제로는 좌우로 훑지 않고 한쪽으로 계속 드리프트하는
+        버그가 있었다 (2026-08-28 확인). 시작 시점에 한 번만 계산해
+        action_params에 고정해둔다.
+
+        cmd:
+            center_heading: 스윕 기준각(도, 절대 헤딩). 지정하면 최우선 사용.
+            center_bearing_to_goal: true면 center_heading 대신 현재 미션
+                구간 목표 지점 방향(bearing)을 기준각으로 사용 - 탐색
+                방향을 진행 방향 쪽으로 맞추고 싶을 때.
+            (둘 다 없으면 시작 시점의 현재 헤딩을 기준각으로 사용)
+        """
+        if 'center_heading' in cmd:
+            center = float(cmd['center_heading'])
+        elif cmd.get('center_bearing_to_goal'):
+            phase = self._current_mission_phase()
+            if phase is not None:
+                goal_x, goal_y = phase[0], phase[1]
+                center = maneuvers.get_goal_info(self.boat, goal_x, goal_y)['bearing']
+            else:
+                center = self.boat.psi
+        else:
+            center = self.boat.psi
+        self.action_params['center_heading'] = center
+        self.get_logger().info(f'dorodori: center_heading={center:.1f}° (시작 시점 고정)')
+
     def _exec_dorodori(self):
-        """좌우 스캔"""
-        duration = self.action_params.get('duration', SETTINGS.DORODORI_PERIOD_SEC)
-        center = self.action_params.get('center_heading', self.boat.psi)
+        """좌우 스캔 (여러 번 왕복하며 탐색)"""
+        duration = self.action_params.get('duration', SETTINGS.DORODORI_DEFAULT_DURATION)
+        center = self.action_params['center_heading']
         half_range = self.action_params.get('half_range', SETTINGS.DORODORI_HALF_RANGE_DEG)
 
         if self.action_elapsed >= duration:
@@ -442,6 +718,37 @@ class ActionDispatcher(Node):
 
         return psi_error, tau_x
 
+    def _init_advance_bearing(self, cmd):
+        """카메라에서 타깃(부표 등)이 살짝이라도 보이는데 LiDAR 클러스터가
+        아직 안 잡힐 때(사거리 밖, 얇은 물체, 각도 미세 오차 등) 쓰는 액션.
+        그 자리에서 align/dorodori로 계속 재탐색만 반복하면 제자리를 맴도는
+        것처럼 보인다 (2026-08-26 사용자 피드백: 부표 탐색 중 실제로 이 문제
+        발생). 카메라로 추정한 상대 방위각만으로 일단 거리를 좁혀 클러스터
+        탐지 범위 안으로 들어오게 한 뒤 재평가한다.
+
+        cmd:
+            bearing_deg: 보트 기준 상대 방위각(도, 카메라/LiDAR 컨벤션과 동일
+                - 0=정면, 양수=좌현, 음수=우현)
+            distance: 전진 거리(m), 기본 SETTINGS.VISUAL_ADVANCE_DISTANCE
+        """
+        bearing = cmd.get('bearing_deg', 0.0)
+        distance = cmd.get('distance', SETTINGS.VISUAL_ADVANCE_DISTANCE)
+        target_heading = normalize_angle(self.boat.psi + bearing)
+        rad = np.radians(target_heading)
+        goal_x = self.boat.position[0] + distance * np.cos(rad)
+        goal_y = self.boat.position[1] + distance * np.sin(rad)
+
+        self.current_action = 'navigate_direct'
+        self.action_params = {
+            'action': 'navigate_direct',
+            'goal_x': goal_x, 'goal_y': goal_y,
+            'hold_heading': target_heading,
+        }
+        self.get_logger().info(
+            f'[Visual] advance_bearing: bearing={bearing:+.1f}° dist={distance:.1f}m '
+            f'-> ({goal_x:.1f}, {goal_y:.1f})'
+        )
+
     def _init_align_to_cluster(self, cmd):
         """클러스터 기준 정렬 초기화 - 클러스터 ID로 해당 물체 방향을 찾아 저장"""
         cluster_id = cmd.get('cluster_id', 0)
@@ -449,9 +756,9 @@ class ActionDispatcher(Node):
 
         if cluster_id < len(clusters):
             cluster = clusters[cluster_id]
-            self.action_params['target_angle'] = cluster['angle']
+            self.action_params['target_angle'] = cluster['center_angle']
             self.get_logger().info(
-                f'align_to_cluster: id={cluster_id} → angle={cluster["angle"]:.1f}°'
+                f'align_to_cluster: id={cluster_id} → angle={cluster["center_angle"]:.1f}°'
             )
         else:
             self.get_logger().warn(f'align_to_cluster: id={cluster_id} not found')
@@ -540,6 +847,8 @@ class ActionDispatcher(Node):
             'last_action': self.last_action,
             'last_action_result': self.last_action_result,
             'retry_count': self.action_retry_count,
+            'mission_phase': self._mission_phase_status(),
+            'waypoint_distance': self._mission_waypoint_distance(),
             'position': {
                 'x': round(self.boat.position[0], 1),
                 'y': round(self.boat.position[1], 1),
