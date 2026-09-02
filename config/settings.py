@@ -57,7 +57,7 @@ BOAT_WIDTH = 2.5       # WAM-V 폭 (m)
 AVOID_RANGE = 30.0      # 장애물 회피 거리 (m)
 GAIN_PSI = 1.0         # 목적지 각도 가중치
 GAIN_DISTANCE = 10.0    # 거리 가중치
-GOAL_RANGE = 15.0      # 웨이포인트 도착 판정 거리 (m)
+GOAL_RANGE = 3.0       # 웨이포인트 도착 판정 거리 (m)
 
 # PD 제어 파라미터
 # VRX 스러스터는 velocity_control=true (각속도 rad/s 입력)
@@ -67,7 +67,7 @@ GOAL_RANGE = 15.0      # 웨이포인트 도착 판정 거리 (m)
 # 클리핑되니 안전하지만, 그 이상은 체감 속도가 늘지 않는다는 점 참고.
 KP = 100.0              # 비례 계수 (각속도 제어용)
 KD = 12.0              # 미분 계수
-MAX_THRUST = 1200.0    # 최대 각속도 (rad/s) - VRX 스러스터 최대
+MAX_THRUST = 2400.0    # 최대 각속도 (rad/s) - VRX 스러스터 최대 (2026-08-26: 2배 증속)
 
 # 회전 감속 구간 - align/dorodori 등 제자리 회전 시, 목표 헤딩에 가까워질수록
 # 최대 회전 출력을 낮춰 관성으로 인한 오버슈트를 방지한다.
@@ -91,17 +91,14 @@ ALIGN_SETTLE_TICKS = 5
 ALIGN_SETTLE_MAX_YAW_RATE_DEG = 5.0   # 이 각속도(도/초) 미만이어야 "회전 멈춤"으로 인정
 
 # ============================================================
-# 추력 설정 (장애물 회피 속도 기준) - 기본값 2배 증가
+# 추력 설정 (장애물 회피 속도 기준)
 # ============================================================
-# 속도 배율 (웹에서 0.25x ~ 5x 조절 가능)
-SPEED_MULTIPLIER = 5.0
-
-# 속도 티어 (직접 지정) - 기본 2배 증가
-TURBO_THRUST = 3000.0      # 터보: 최고속 직진 (1500 → 3000)
-FAST_THRUST = 2000.0       # 빠름: 클리어 직진 (1000 → 2000)
-NORMAL_THRUST = 2000.0     # 보통: 장애물 회피 = 기준 (1000 → 2000)
-SLOW_THRUST = 600.0        # 느림: 도킹 접근 (300 → 600)
-CRAWL_THRUST = 400.0       # 초저속: 정밀 접근 (200 → 400)
+# 속도 티어 (직접 지정) - 2026-08-26: 전부 2배 증속
+TURBO_THRUST = 3000.0      # 터보: 최고속 직진
+FAST_THRUST = 2000.0       # 빠름: 클리어 직진
+NORMAL_THRUST = 1000.0     # 보통: 장애물 회피 = 기준
+SLOW_THRUST = 600.0        # 느림: 도킹 접근
+CRAWL_THRUST = 400.0       # 초저속: 정밀 접근
 
 # pathplan()의 기준 추력
 MAX_FORWARD_THRUST = FAST_THRUST         # 최대 전진 (1000)
@@ -118,9 +115,8 @@ STOP_THRUST = 0.0                        # 정지: 0 (모터 출력 없음)
 
 # 기동 파라미터
 HOVER_DEADBAND = 0.5             # 호버링 위치 허용 오차 (m)
-DORODORI_HALF_RANGE_DEG = 45.0   # 도리도리 좌우 스윕 범위 (도) - 넓게 스캔
-DORODORI_PERIOD_SEC = 8.0        # 도리도리 왕복 주기 (초) - 천천히
-DORODORI_DEFAULT_DURATION = 16.0 # 기본 duration (2왕복)
+DORODORI_HALF_RANGE_DEG = 30.0   # 도리도리 좌우 스윕 범위 (도)
+DORODORI_PERIOD_SEC = 6.0        # 도리도리 왕복 주기 (초) - 빠르게
 ORBIT_DEFAULT_RADIUS = 8.0       # 궤도 반경 (m)
 ORBIT_N_POINTS = 6               # 궤도 웨이포인트 (6개 = 60도 간격)
 
@@ -135,7 +131,7 @@ LIDAR_SMOOTHING_ENABLED = True   # LiDAR 지수 평균 스무딩
 LIDAR_SMOOTHING_DECAY = 0.95     # 스무딩 감쇠율 (높을수록 넓게 평균)
 
 # 클러스터 탐지 (부표 무리/도킹 스테이션 후보 - align 우선 탐색용)
-CLUSTER_MAX_RANGE = 50.0   # 클러스터 탐색 최대 거리 (m) - 이 밖은 무시 (2026-08-26: 2배 확장, 원거리 부표가 탐지 범위 밖이라 카메라로만 보이던 문제)
+CLUSTER_MAX_RANGE = 25.0   # 클러스터 탐색 최대 거리 (m) - 이 밖은 무시
 CLUSTER_GAP_DEG = 6        # 같은 클러스터로 묶을 최대 각도 간격 (도)
 CLUSTER_MIN_POINTS = 3     # 노이즈 제외 최소 포인트 수
 CLUSTER_MAX_COUNT = 3      # 반환할 최대 클러스터 수 (가까운 순)
@@ -149,7 +145,7 @@ CLUSTER_MAX_MISSES = 2          # 이 프레임 수 연속 미관측이면 트�
 # 2D LaserScan 클러스터링(CLUSTER_*)과 별개 - x,y 평면에 격자(voxel)를 깔고
 # 인접 셀을 연결(connected components)해 물체 후보를 찾는다. z를 함께 걸러
 # 수면 반사/자기구조물을 배제할 수 있는 게 2D 대비 핵심 차이점.
-CLUSTER3D_MAX_RANGE = 50.0   # 클러스터 탐색 최대 수평 거리 (m) - 2026-08-26: 2배 확장 (CLUSTER_MAX_RANGE와 동일 사유)
+CLUSTER3D_MAX_RANGE = 25.0   # 클러스터 탐색 최대 수평 거리 (m)
 CLUSTER3D_VOXEL_SIZE = 1.0   # 격자 셀 크기 (m) - 이 셀 크기 이내로 인접하면 같은 물체 후보
 CLUSTER3D_MIN_POINTS = 5     # 노이즈 제외 최소 포인트 수 (3D는 점이 훨씬 많아 2D보다 높게)
 CLUSTER3D_MAX_COUNT = 3      # 반환할 최대 클러스터 수 (가까운 순)
@@ -161,16 +157,7 @@ CLUSTER3D_Z_MAX = 5.0        # 센서 기준 이 위는 마스트/구조물 오�
 # 흔들릴 수 있으니 RViz로 재확인 후 조정할 것 (CLUSTER3D_Z_MAX는 미실측 잠정값).
 
 CLUSTER3D_STALE_SEC = 1.0    # PointCloud2가 이 시간(초) 이상 안 오면 2D LaserScan
-                              # 클러스터링(detect_lidar_clusters)으로 폴백
-                              # (cluster_visualizer.py 및 2026-08-26부터 action_dispatcher의
-                              # 실제 미션 파이프라인(analyze_lidar)에도 동일하게 적용)
-
-# 시야에는 들어오지만(카메라로 살짝이라도 보임) LiDAR 클러스터가 아직 안 잡힐 때
-# (사거리 밖, 얇은 물체, 각도 미세 오차 등) 쓰는 'advance_bearing' 액션의 기본
-# 전진 거리 - 그 자리에서 계속 정렬만 반복하며 "제자리 회전"하는 대신, 카메라
-# 방위각만으로 일단 거리를 좁혀서 클러스터 탐지 범위 안으로 들어오게 한다
-# (2026-08-26: 부표 탐색 중 align/dorodori만 반복해 제자리를 맴도는 문제 확인).
-VISUAL_ADVANCE_DISTANCE = 20.0   # advance_bearing 기본 전진 거리 (m)
+                              # 클러스터링(detect_lidar_clusters)으로 폴백 (cluster_visualizer.py)
 
 # 클러스터 거부 기록 (reject_cluster 액션 - 카메라로 "타깃 아님" 확인된 곳을
 # 전역 좌표로 기억해 재탐색 방지. LLM 대화가 짧게 끊겨도 action_dispatcher
@@ -231,40 +218,34 @@ MISSION_WAYPOINTS_GPS = {
     },
 }
 
-# 미션 순서 (순차 실행). 각 항목은 (이름, requires_llm) -
-# requires_llm=False인 지점은 도착 즉시 action_dispatcher가 다음 지점으로
-# 스스로 navigate_avoid를 발행한다("구간 전환 자동화" - 순수 GPS 이동이라
-# 판단 여지가 없음). requires_llm=True인 지점은 도착하면 멈추고 LLM에게
-# 넘긴다(비전이 필요한 게이트 통과/부표선회/도킹) - LLM이 그 작업을 마치면
-# 'mission_phase_done' 액션을 호출해야 다음 자동 구간이 재개된다.
+# 미션 순서 (순차 실행)
 MISSION_SEQUENCE = [
-    ('start', False),
-    ('gate_start', False),               # 게이트 통과 → 자동 전환
-    ('gate_end', False),                 # 게이트 통과의 자연스러운 도착점
-    ('buoy_orbit', False),               # 부표 선회 → 자동 전환
-    ('hopping', False),                  # 순수 이동 지점
-    ('obstacle_end_dock_start', False),  # 도킹 → 자동 전환 (미션 마지막 지점)
+    'start',
+    'gate_start',
+    'gate_end',
+    'buoy_orbit',
+    'hopping',
+    'obstacle_end_dock_start',
 ]
 
 
 def get_mission_waypoints_local():
     """
     미션 웨이포인트를 로컬 좌표(ENU)로 변환하여 반환
-    Returns: [(x, y, name, desc, requires_llm), ...]
+    Returns: [(x, y, name, desc), ...]
     """
     waypoints = []
-    for name, requires_llm in MISSION_SEQUENCE:
+    for name in MISSION_SEQUENCE:
         wp = MISSION_WAYPOINTS_GPS[name]
         utm_x, utm_y, _ = latlon_to_utm(wp['lat'], wp['lon'])
         local_x = utm_x - REF_UTM_X
         local_y = utm_y - REF_UTM_Y
-        waypoints.append((local_x, local_y, name, wp['desc'], requires_llm))
+        waypoints.append((local_x, local_y, name, wp['desc']))
     return waypoints
 
 
 def print_mission_waypoints():
     """미션 웨이포인트 출력 (디버그용)"""
     print("=== 미션 웨이포인트 (로컬 좌표) ===")
-    for x, y, name, desc, requires_llm in get_mission_waypoints_local():
-        tag = "[LLM/비전]" if requires_llm else "[자동]"
-        print(f"  {tag} {name}: ({x:.1f}, {y:.1f}) - {desc}")
+    for x, y, name, desc in get_mission_waypoints_local():
+        print(f"  {name}: ({x:.1f}, {y:.1f}) - {desc}")
