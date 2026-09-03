@@ -388,6 +388,28 @@ def navigate_direct(boat: Boat, goal_x: float, goal_y: float,
 
 
 # ============================================================
+# 7-1. advance_bearing: 지정 방위(절대 헤딩, ENU)로 일정 거리 전진할
+#      목표 좌표를 계산 (카메라엔 보이는데 LiDAR 클러스터가 안 잡힐 때,
+#      "그 방향으로 일단 접근" 용도 - mission_prompt.py 참고)
+# ============================================================
+
+def advance_bearing_target(boat: Boat, bearing_deg: float,
+                            distance: float = 20.0) -> Tuple[float, float]:
+    """
+    현재 위치 기준으로 절대 방위(bearing_deg, ENU: 0°=동쪽/CCW+)를 따라
+    distance(m) 앞의 좌표를 계산한다. 호출 시점의 위치를 기준으로 한 번만
+    계산되는 고정 목표점이어야 하므로(매 틱 재계산하면 계속 전진만 하며
+    도착 판정이 안 됨), action_dispatcher가 액션 시작 시 1회만 호출해
+    goal_x/goal_y로 저장하고, 이후엔 navigate_direct 실행 로직을 그대로
+    재사용한다(hold_heading=bearing_deg로 방위 유지).
+    """
+    bearing_rad = np.radians(bearing_deg)
+    goal_x = boat.position[0] + distance * np.cos(bearing_rad)
+    goal_y = boat.position[1] + distance * np.sin(bearing_rad)
+    return (float(goal_x), float(goal_y))
+
+
+# ============================================================
 # 7. 유틸리티: 목표 도달 확인
 # ============================================================
 

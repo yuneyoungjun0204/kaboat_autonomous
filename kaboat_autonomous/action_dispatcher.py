@@ -72,13 +72,22 @@ class ActionDispatcher(Node):
         self.current_action = None
         self.action_start_time = None
         self.action_params = {}
-        self.waypoint_queue = []
+        self.waypoint_queue = []       # [(x, y), ...] 또는 [(x, y, hold_sec), ...]
         self.current_waypoint_idx = 0
+        self.waypoint_hold_until = None  # 현재 웨이포인트에서 hold_sec 대기 중이면 그 종료 시각(time.time() 기준)
 
         # 타이머 기반 상태 (dorodori 등)
         self.action_elapsed = 0.0
         self.align_settle_count = 0  # align이 tolerance 이내에 연속으로 머문 틱 수
         self.yaw_rate_deg = 0.0      # IMU 기반 실제 요(yaw) 각속도 (도/초)
+
+        # === 미션 단계 자동 전환 (mission_phase_done) ===
+        # SETTINGS.get_mission_waypoints_local()의 순서를 그대로 따라간다.
+        # requires_llm=True인 지점에 도착하면 멈춰 LLM(대시보드) 판단을 기다리고,
+        # False면 즉시 다음 지점으로 navigate_avoid를 연쇄 발행한다.
+        self.mission_waypoints = SETTINGS.get_mission_waypoints_local()
+        self.mission_phase_idx = 0
+        self.auto_transit = False   # 현재 navigate_avoid가 미션 자동 전환에 의한 것인지 여부
 
         # === 압축 상태(blackboard) ===
         # LLM 대화를 매 판단마다 짧게 끊어도(bounded-context) "방금 뭘 했는지,
@@ -195,6 +204,10 @@ class ActionDispatcher(Node):
             self.action_start_time = time.time()
             self.action_elapsed = 0.0
             self.action_params = cmd
+            # 새 액션이 시작되면 기본적으로 자동 전환 체인은 끊는다 - 아래
+            # mission_phase_done 분기에서만 다시 True로 설정한다.
+            self.auto_transit = False
+            self.waypoint_hold_until = None
 
             # 액션별 초기화
             if action == 'orbit':
@@ -216,6 +229,10 @@ class ActionDispatcher(Node):
             elif action == 'reject_cluster':
                 self._reject_cluster(cmd)
                 self.current_action = None
+            elif action == 'mission_phase_done':
+                self._advance_mission_phase(goto=cmd.get('goto'))
+            elif action == 'advance_bearing':
+                self._init_advance_bearing(cmd)
 
         except json.JSONDecodeError as e:
             self.get_logger().error(f'Invalid JSON: {e}')
@@ -267,8 +284,9 @@ class ActionDispatcher(Node):
 
         waypoints = maneuvers.plan_orbit(self.boat, idx, radius, direction, laps=laps)
         if waypoints:
-            self.waypoint_queue = waypoints
+            self.waypoint_queue = [(wx, wy, 0.0) for wx, wy in waypoints]
             self.current_waypoint_idx = 0
+            self.waypoint_hold_until = None
             self.get_logger().info(f'Orbit: {len(waypoints)} waypoints generated')
         else:
             self.get_logger().warn(f'Orbit failed: no valid lidar at idx {idx}')
@@ -282,8 +300,9 @@ class ActionDispatcher(Node):
 
         wp = maneuvers.midpoint_waypoint_from_scan(self.boat, left_idx, right_idx)
         if wp:
-            self.waypoint_queue = [wp]
+            self.waypoint_queue = [(wp[0], wp[1], 0.0)]
             self.current_waypoint_idx = 0
+            self.waypoint_hold_until = None
             self.get_logger().info(f'Gate pass: midpoint at ({wp[0]:.1f}, {wp[1]:.1f})')
         else:
             self.get_logger().warn('Gate pass failed: invalid lidar indices')
@@ -291,12 +310,76 @@ class ActionDispatcher(Node):
             self.current_action = None
 
     def _init_waypoints(self, cmd):
-        """웨이포인트 리스트 설정"""
+        """웨이포인트 리스트 설정. 각 항목에 선택적으로 hold_sec을 줄 수 있다
+        (예: 호핑투어처럼 지점마다 몇 초 정지 후 다음으로 진행) - 생략하면 0
+        (기존과 동일하게 도착 즉시 다음 지점으로)."""
         wps = cmd.get('waypoints', [])
         if wps:
-            self.waypoint_queue = [(w['x'], w['y']) for w in wps]
+            self.waypoint_queue = [(w['x'], w['y'], float(w.get('hold_sec', 0.0))) for w in wps]
             self.current_waypoint_idx = 0
+            self.waypoint_hold_until = None
             self.get_logger().info(f'Waypoints: {len(wps)} loaded')
+
+    def _advance_mission_phase(self, goto=None):
+        """미션 단계를 한 칸 전진시키고 '그 지점까지는' 항상 navigate_avoid로
+        자동 이동한다 (requires_llm은 이동 여부가 아니라 "도착한 뒤" 멈춰서
+        LLM 판단을 기다릴지를 결정한다 - 예: gate_start는 requires_llm=True지만
+        start->gate_start 이동 자체는 자동이고, 도착해서야 게이트 인식을
+        시작해야 하므로 거기서 멈춘다). 실제로 requires_llm을 검사해 멈출지
+        더 진행할지는 _exec_navigate_avoid의 도착 처리에서 한다.
+
+        goto: 웨이포인트 이름을 지정하면 순차 진행 대신 그 지점으로 바로
+        점프한다 (미션별 검증 모드가 처음부터 순서대로 다시 밟지 않고
+        해당 미션 시작점으로 바로 이동할 때 사용).
+        """
+        if goto is not None:
+            match_idx = next(
+                (i for i, wp in enumerate(self.mission_waypoints) if wp[3] == goto), None
+            )
+            if match_idx is None:
+                self.get_logger().warn(f'mission_phase: unknown goto target "{goto}"')
+            else:
+                self.mission_phase_idx = match_idx - 1
+
+        self.mission_phase_idx += 1
+
+        if self.mission_phase_idx >= len(self.mission_waypoints):
+            self.get_logger().info('mission_phase: sequence complete')
+            self._record_result('mission_phase_done', 'sequence_complete')
+            self.current_action = None
+            self.auto_transit = False
+            return
+
+        x, y, heading, name, desc, requires_llm = self.mission_waypoints[self.mission_phase_idx]
+        self.get_logger().info(
+            f'mission_phase: -> {name} 이동 시작 (도착 시 {"LLM 대기" if requires_llm else "자동 연쇄"}) - {desc}'
+        )
+
+        self.current_action = 'navigate_avoid'
+        self.action_start_time = time.time()
+        self.action_elapsed = 0.0
+        self.action_params = {'goal_x': x, 'goal_y': y}
+        self.auto_transit = True
+        self._record_result('mission_phase_done', f'transit_to:{name}')
+
+    def _init_advance_bearing(self, cmd):
+        """지정 방위(bearing_deg)로 distance(m) 앞의 좌표를 1회 계산해
+        저장 - 이후엔 navigate_direct와 동일한 실행 로직을 재사용한다."""
+        bearing_deg = cmd.get('bearing_deg')
+        distance = cmd.get('distance', 20.0)
+        if bearing_deg is None:
+            self.get_logger().warn('advance_bearing: bearing_deg missing')
+            self._record_result('advance_bearing', 'failed_no_bearing')
+            self.current_action = None
+            return
+
+        goal_x, goal_y = maneuvers.advance_bearing_target(self.boat, float(bearing_deg), float(distance))
+        self.action_params['goal_x'] = goal_x
+        self.action_params['goal_y'] = goal_y
+        self.action_params['hold_heading'] = float(bearing_deg)
+        self.get_logger().info(
+            f'advance_bearing: bearing={bearing_deg}° distance={distance}m -> ({goal_x:.1f}, {goal_y:.1f})'
+        )
 
     def _stop(self):
         """정지"""
@@ -332,7 +415,7 @@ class ActionDispatcher(Node):
         # 액션별 처리
         if self.current_action == 'navigate_avoid':
             psi_error, tau_x = self._exec_navigate_avoid()
-        elif self.current_action == 'navigate_direct':
+        elif self.current_action in ('navigate_direct', 'advance_bearing'):
             psi_error, tau_x = self._exec_navigate_direct()
         elif self.current_action == 'backward':
             psi_error, tau_x = self._exec_backward()
@@ -364,28 +447,46 @@ class ActionDispatcher(Node):
                     'x': self.boat.position[0], 'y': self.boat.position[1]
                 })
             self._record_result('navigate_avoid', 'goal_reached')
-            self.current_action = None
+            if self.auto_transit:
+                # 미션 단계 자동 전환 중 도착 - 방금 도착한 지점이
+                # requires_llm=True면 여기서 멈춰 LLM 판단을 기다리고,
+                # False면 계속 다음 지점으로 연쇄 진행한다
+                # (예: buoy_orbit -> hopping -> obstacle_end_dock_start).
+                _, _, _, phase_name, _, phase_requires_llm = self.mission_waypoints[self.mission_phase_idx]
+                if phase_requires_llm:
+                    self.get_logger().info(f'mission_phase: arrived at {phase_name}, awaiting LLM')
+                    self.current_action = None
+                    self.auto_transit = False
+                    self._record_result('mission_phase_done', f'awaiting_llm:{phase_name}')
+                else:
+                    self._advance_mission_phase()
+            else:
+                self.current_action = None
             return 0.0, 0.0
 
         return maneuvers.navigate_avoid(self.boat, goal_x, goal_y)
 
     def _exec_navigate_direct(self):
-        """직진 항법 (hold_heading 지정 시 목표 방향 대신 해당 헤딩을 유지하며 직진)"""
+        """직진 항법 (hold_heading 지정 시 목표 방향 대신 해당 헤딩을 유지하며 직진).
+        advance_bearing도 초기화 후엔 이 실행 로직을 그대로 공유한다.
+        thrust 파라미터를 지정하면(예: 도킹 저속 접근용 SLOW_THRUST/CRAWL_THRUST)
+        기본 순항 추력 대신 그 값을 기준으로 사용한다."""
         goal_x = self.action_params.get('goal_x', self.boat.position[0])
         goal_y = self.action_params.get('goal_y', self.boat.position[1])
         hold_heading = self.action_params.get('hold_heading')
+        thrust = self.action_params.get('thrust')
 
         if maneuvers.is_goal_reached(self.boat, goal_x, goal_y):
-            self.get_logger().info('navigate_direct: goal reached')
+            self.get_logger().info(f'{self.current_action}: goal reached')
             if self.logger:
-                self.logger.log_waypoint_reached('navigate_direct_goal', {
+                self.logger.log_waypoint_reached(f'{self.current_action}_goal', {
                     'x': self.boat.position[0], 'y': self.boat.position[1]
                 })
-            self._record_result('navigate_direct', 'goal_reached')
+            self._record_result(self.current_action, 'goal_reached')
             self.current_action = None
             return 0.0, 0.0
 
-        return maneuvers.navigate_direct(self.boat, goal_x, goal_y, hold_heading=hold_heading)
+        return maneuvers.navigate_direct(self.boat, goal_x, goal_y, thrust=thrust, hold_heading=hold_heading)
 
     def _exec_backward(self):
         """후진"""
@@ -516,27 +617,49 @@ class ActionDispatcher(Node):
         return psi_error, tau_x
 
     def _exec_waypoint_follow(self):
-        """웨이포인트 순차 추종 (orbit, gate_pass, waypoints)"""
+        """웨이포인트 순차 추종 (orbit, gate_pass, waypoints). 각 지점은
+        (x, y, hold_sec) 형태로 저장되며, hold_sec > 0이면 도착 후 그
+        시간만큼 정지했다가 다음 지점으로 넘어간다(호핑투어의 "지점마다
+        3초 정지" 요구사항). hold_sec=0(기본)이면 기존과 동일하게 도착
+        즉시 다음으로 진행한다."""
         if self.current_waypoint_idx >= len(self.waypoint_queue):
             self.get_logger().info(f'{self.current_action}: all waypoints complete')
             if self.logger:
                 self.logger.log_action(self.current_action, {}, "completed")
             self._record_result(self.current_action, 'completed')
             self.current_action = None
+            self.waypoint_hold_until = None
             return 0.0, 0.0
 
-        goal_x, goal_y = self.waypoint_queue[self.current_waypoint_idx]
+        goal_x, goal_y, hold_sec = self.waypoint_queue[self.current_waypoint_idx]
+
+        # 이미 도착해서 hold 중이면 - 대기 시간이 끝날 때까지 정지 유지
+        if self.waypoint_hold_until is not None:
+            if time.time() < self.waypoint_hold_until:
+                return 0.0, 0.0
+            self.waypoint_hold_until = None
+            self.current_waypoint_idx += 1
+            self.get_logger().info(
+                f'{self.current_action}: waypoint {self.current_waypoint_idx}/{len(self.waypoint_queue)} (hold 완료, 다음 진행)'
+            )
+            return 0.0, 0.0
 
         if maneuvers.is_goal_reached(self.boat, goal_x, goal_y):
+            if self.logger:
+                self.logger.log_waypoint_reached(
+                    f'{self.current_action}_wp{self.current_waypoint_idx + 1}',
+                    {'x': self.boat.position[0], 'y': self.boat.position[1]}
+                )
+            if hold_sec > 0:
+                self.waypoint_hold_until = time.time() + hold_sec
+                self.get_logger().info(
+                    f'{self.current_action}: waypoint {self.current_waypoint_idx + 1}/{len(self.waypoint_queue)} 도착, {hold_sec}s 정지'
+                )
+                return 0.0, 0.0
             self.current_waypoint_idx += 1
             self.get_logger().info(
                 f'{self.current_action}: waypoint {self.current_waypoint_idx}/{len(self.waypoint_queue)}'
             )
-            if self.logger:
-                self.logger.log_waypoint_reached(
-                    f'{self.current_action}_wp{self.current_waypoint_idx}',
-                    {'x': self.boat.position[0], 'y': self.boat.position[1]}
-                )
             return 0.0, 0.0
 
         # 장애물 회피 사용 여부
@@ -562,6 +685,11 @@ class ActionDispatcher(Node):
             'last_action': self.last_action,
             'last_action_result': self.last_action_result,
             'retry_count': self.action_retry_count,
+            'mission_phase': (
+                self.mission_waypoints[self.mission_phase_idx][3]
+                if 0 <= self.mission_phase_idx < len(self.mission_waypoints) else None
+            ),
+            'mission_phase_idx': self.mission_phase_idx,
             'position': {
                 'x': round(self.boat.position[0], 1),
                 'y': round(self.boat.position[1], 1),
@@ -576,7 +704,7 @@ class ActionDispatcher(Node):
 
         # 현재 웨이포인트까지 거리
         if self.waypoint_queue and self.current_waypoint_idx < len(self.waypoint_queue):
-            gx, gy = self.waypoint_queue[self.current_waypoint_idx]
+            gx, gy, _hold_sec = self.waypoint_queue[self.current_waypoint_idx]
             info = maneuvers.get_goal_info(self.boat, gx, gy)
             status['current_goal'] = info
 
