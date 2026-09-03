@@ -1,0 +1,50 @@
+{
+  "_comment": "미션 단계 웨이포인트 저장소. 대시보드의 '웨이포인트 설정 모드'(QGroundControl 스타일 클릭 편집)로 갱신되며, config/settings.py의 get_mission_waypoints_local()이 이 파일을 우선 읽는다. sequence 순서대로 action_dispatcher의 mission_phase_idx가 진행된다. heading_deg는 선택 - null이면 헤딩을 신경쓰지 않는다.",
+  "sequence": ["start", "gate_start", "gate_end", "buoy_orbit", "hopping", "obstacle_end_dock_start"],
+  "waypoints": {
+    "start": {
+      "lat": -33.72276217109793,
+      "lon": 150.67402781112585,
+      "heading_deg": null,
+      "requires_llm": false,
+      "desc": "시작점"
+    },
+    "gate_start": {
+      "lat": -33.72269262,
+      "lon": 150.67397336,
+      "heading_deg": 85.6,
+      "requires_llm": true,
+      "desc": "게이트 통과 시작점"
+    },
+    "gate_end": {
+      "lat": -33.72189802,
+      "lon": 150.67397480,
+      "heading_deg": 85.5,
+      "requires_llm": false,
+      "desc": "게이트 통과 끝점"
+    },
+    "buoy_orbit": {
+      "lat": -33.72155249,
+      "lon": 150.67425373,
+      "heading_deg": -80.0,
+      "requires_llm": true,
+      "desc": "부표선회 시작 지점"
+    },
+    "hopping": {
+      "lat": -33.72170388,
+      "lon": 150.67452439,
+      "heading_deg": -87.0,
+      "requires_llm": false,
+      "desc": "호핑투어"
+    },
+    "obstacle_end_dock_start": {
+      "lat": -33.72259378,
+      "lon": 150.67455630,
+      "heading_deg": -86.8,
+      "requires_llm": true,
+      "desc": "장애물 회피 끝 / 도킹 시작"
+    }
+  },
+  "hopping_stops": [],
+  "dock": null
+}

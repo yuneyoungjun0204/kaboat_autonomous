@@ -2,7 +2,9 @@
 KABOAT 자율주행 파라미터 설정
 SeaNU_KABOAT2024 기반, VRX 시뮬레이터용으로 수정
 """
+import json
 import math
+import os
 
 
 def latlon_to_utm(lat: float, lon: float) -> tuple:
@@ -242,20 +244,70 @@ MISSION_SEQUENCE = [
 ]
 
 
+# 대시보드의 '웨이포인트 설정 모드'(QGroundControl 스타일 클릭 편집)가 읽고 쓰는
+# 파일. 존재하면 아래 MISSION_WAYPOINTS_GPS/MISSION_SEQUENCE 대신 이 파일을
+# 우선 사용한다 - 하드코딩된 값은 파일이 없거나 깨졌을 때의 폴백으로만 남는다.
+MISSION_WAYPOINTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mission_waypoints.json')
+
+
+def _load_mission_waypoints_from_file():
+    """MISSION_WAYPOINTS_FILE을 읽어 (sequence, waypoints_dict)를 반환.
+    파일이 없거나 형식이 깨졌으면 None을 반환해 호출부가 하드코딩된
+    MISSION_WAYPOINTS_GPS/MISSION_SEQUENCE로 폴백하게 한다."""
+    try:
+        with open(MISSION_WAYPOINTS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        sequence = data['sequence']
+        waypoints = data['waypoints']
+        for name in sequence:
+            wp = waypoints[name]
+            if wp.get('lat') is None or wp.get('lon') is None:
+                return None  # 아직 위경도가 안 찍힌 단계가 있으면 폴백
+        return sequence, waypoints
+    except (OSError, KeyError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def get_mission_waypoints_local():
     """
     미션 웨이포인트를 로컬 좌표(ENU)로 변환하여 반환
     Returns: [(x, y, heading, name, desc, requires_llm), ...]
     heading은 없으면 None (ENU 기준, 0°=동쪽, 90°=북쪽)
     """
+    loaded = _load_mission_waypoints_from_file()
+    if loaded is not None:
+        sequence, waypoints_gps = loaded
+    else:
+        sequence, waypoints_gps = MISSION_SEQUENCE, MISSION_WAYPOINTS_GPS
+
     waypoints = []
-    for name in MISSION_SEQUENCE:
-        wp = MISSION_WAYPOINTS_GPS[name]
+    for name in sequence:
+        wp = waypoints_gps[name]
         utm_x, utm_y, _ = latlon_to_utm(wp['lat'], wp['lon'])
         local_x = utm_x - REF_UTM_X
         local_y = utm_y - REF_UTM_Y
-        waypoints.append((local_x, local_y, wp.get('heading'), name, wp['desc'], wp.get('requires_llm', False)))
+        waypoints.append((
+            local_x, local_y, wp.get('heading_deg', wp.get('heading')),
+            name, wp.get('desc', name), wp.get('requires_llm', False)
+        ))
     return waypoints
+
+
+def get_hopping_stops_local():
+    """mission_waypoints.json의 hopping_stops(호핑투어 다중 지점)를
+    로컬 좌표로 변환해 반환. Returns: [(x, y, heading_deg|None), ...]"""
+    try:
+        with open(MISSION_WAYPOINTS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        stops = data.get('hopping_stops', [])
+    except (OSError, ValueError, json.JSONDecodeError):
+        stops = []
+
+    result = []
+    for s in stops:
+        utm_x, utm_y, _ = latlon_to_utm(s['lat'], s['lon'])
+        result.append((utm_x - REF_UTM_X, utm_y - REF_UTM_Y, s.get('heading_deg')))
+    return result
 
 
 def print_mission_waypoints():
