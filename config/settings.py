@@ -305,7 +305,10 @@ def get_hopping_stops_local():
 
     result = []
     for s in stops:
-        utm_x, utm_y, _ = latlon_to_utm(s['lat'], s['lon'])
+        lat, lon = s.get('lat'), s.get('lon')
+        if lat is None or lon is None:
+            continue  # 아직 좌표가 안 찍힌 항목은 건너뜀 (_load_mission_waypoints_from_file과 동일한 방어)
+        utm_x, utm_y, _ = latlon_to_utm(lat, lon)
         result.append((utm_x - REF_UTM_X, utm_y - REF_UTM_Y, s.get('heading_deg')))
     return result
 

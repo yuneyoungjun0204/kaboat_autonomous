@@ -233,6 +233,19 @@ class ActionDispatcher(Node):
                 self._advance_mission_phase(goto=cmd.get('goto'))
             elif action == 'advance_bearing':
                 self._init_advance_bearing(cmd)
+            elif action == 'mission_auto_pause':
+                # CORE_PROMPT가 모든 미션에 문서화하는 액션인데 핸들러가 없으면
+                # current_action이 이 문자열로 영원히 고정돼 매 틱 0-추력만
+                # 발행하고 decision_needed도 계속 False로 멈춘다(보트가 사실상
+                # 응답불능 상태로 얼어붙음) - 위 제네릭 초기화가 이미
+                # current_action=action, auto_transit=False로 세팅했으니,
+                # 여기서는 그걸 즉시 None으로 되돌려 정지+decision_needed=True로
+                # 만드는 것만으로 "일시정지" 의미를 충족한다.
+                self.get_logger().info('mission_phase: auto-transit paused by LLM')
+                self.current_action = None
+                self._record_result('mission_auto_pause', 'paused')
+            elif action == 'mission_auto_resume':
+                self._resume_mission_phase()
 
         except json.JSONDecodeError as e:
             self.get_logger().error(f'Invalid JSON: {e}')
@@ -337,9 +350,15 @@ class ActionDispatcher(Node):
                 (i for i, wp in enumerate(self.mission_waypoints) if wp[3] == goto), None
             )
             if match_idx is None:
-                self.get_logger().warn(f'mission_phase: unknown goto target "{goto}"')
-            else:
-                self.mission_phase_idx = match_idx - 1
+                # 오타 등으로 못 찾은 경우 - 예전 인덱스에서 그냥 +1 진행해버리면
+                # 엉뚱한 지점으로 조용히 이동해버릴 수 있으니, 여기서 확실히
+                # 멈추고 호출자가 알 수 있게 한다.
+                self.get_logger().warn(f'mission_phase: unknown goto target "{goto}" - 이동 취소')
+                self.current_action = None
+                self.auto_transit = False
+                self._record_result('mission_phase_done', f'failed_unknown_goto:{goto}')
+                return
+            self.mission_phase_idx = match_idx - 1
 
         self.mission_phase_idx += 1
 
@@ -361,6 +380,28 @@ class ActionDispatcher(Node):
         self.action_params = {'goal_x': x, 'goal_y': y}
         self.auto_transit = True
         self._record_result('mission_phase_done', f'transit_to:{name}')
+
+    def _resume_mission_phase(self):
+        """mission_auto_pause로 멈춘 자동 전환을 재개한다. _advance_mission_phase와
+        달리 인덱스를 전진시키지 않고 '현재 mission_phase_idx가 가리키는 지점'으로
+        다시 navigate_avoid를 발행한다 - LLM이 일시정지 중 수동 액션(align 등)으로
+        위치를 바꿔놨을 수 있으므로 그 지점으로 다시 이동시키는 게 맞다."""
+        if not (0 <= self.mission_phase_idx < len(self.mission_waypoints)):
+            self.get_logger().warn('mission_auto_resume: 유효한 미션 단계가 없음')
+            self.current_action = None
+            self.auto_transit = False
+            self._record_result('mission_auto_resume', 'failed_no_phase')
+            return
+
+        x, y, heading, name, desc, requires_llm = self.mission_waypoints[self.mission_phase_idx]
+        self.get_logger().info(f'mission_phase: auto-transit resumed -> {name}')
+
+        self.current_action = 'navigate_avoid'
+        self.action_start_time = time.time()
+        self.action_elapsed = 0.0
+        self.action_params = {'goal_x': x, 'goal_y': y}
+        self.auto_transit = True
+        self._record_result('mission_auto_resume', f'resumed:{name}')
 
     def _init_advance_bearing(self, cmd):
         """지정 방위(bearing_deg)로 distance(m) 앞의 좌표를 1회 계산해
