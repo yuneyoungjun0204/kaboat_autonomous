@@ -369,7 +369,7 @@ class ActionDispatcher(Node):
             self.auto_transit = False
             return
 
-        x, y, heading, name, desc, requires_llm = self.mission_waypoints[self.mission_phase_idx]
+        x, y, _heading, name, desc, requires_llm = self.mission_waypoints[self.mission_phase_idx]
         self.get_logger().info(
             f'mission_phase: -> {name} 이동 시작 (도착 시 {"LLM 대기" if requires_llm else "자동 연쇄"}) - {desc}'
         )
@@ -393,7 +393,7 @@ class ActionDispatcher(Node):
             self._record_result('mission_auto_resume', 'failed_no_phase')
             return
 
-        x, y, heading, name, desc, requires_llm = self.mission_waypoints[self.mission_phase_idx]
+        x, y, _heading, name, desc, requires_llm = self.mission_waypoints[self.mission_phase_idx]
         self.get_logger().info(f'mission_phase: auto-transit resumed -> {name}')
 
         self.current_action = 'navigate_avoid'
