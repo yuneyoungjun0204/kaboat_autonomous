@@ -288,7 +288,7 @@ CORE_PROMPT = CORE_PROMPT_BODY.replace(
 
 # 카메라(색상/마커 인식)가 필요한 미션에만 포함하는 조각.
 # gate_search/buoy_orbit/docking 전용, hopping_tour/obstacle_course에는 불필요.
-VISION_GUIDE = """## 색상-부표 규약 (본 코스 실측 기준, IALA와 반대)
+VISION_GUIDE = f"""## 색상-부표 규약 (본 코스 실측 기준, IALA와 반대)
 - **녹색(Green)**: 좌현 통과 (왼쪽에 두고 지나감)
 - **적색(Red)**: 우현 통과 (오른쪽에 두고 지나감)
 - 게이트: 녹색-적색 사이로 진입
@@ -297,8 +297,9 @@ VISION_GUIDE = """## 색상-부표 규약 (본 코스 실측 기준, IALA와 반
 ## 이미지 분석 시
 - 적색/녹색/파란색 부표 위치를 화면 좌표로 파악
 - 화면 중앙 = 정면(0°), 왼쪽 = 좌현(+), 오른쪽 = 우현(-)
-- 화면 X 좌표를 LiDAR 각도로 변환: `lidar_angle = (320 - image_x) / 320 * 60`
-  - 예: x=160 (왼쪽 1/4) → +30° / x=480 (오른쪽 1/4) → -30° (idx=330)
+- 화면 X 좌표를 LiDAR 각도로 변환 (실제 카메라 해상도 1280x720 기준,
+  중앙=640px): `lidar_angle = (640 - image_x) / 640 * {SETTINGS.CAMERA_HALF_FOV_DEG:.0f}`
+  - 예: x=320 (왼쪽 1/4) → +{SETTINGS.CAMERA_HALF_FOV_DEG/2:.0f}° / x=960 (오른쪽 1/4) → -{SETTINGS.CAMERA_HALF_FOV_DEG/2:.0f}°
 
 ## 카메라-LiDAR 융합 추론 (핵심!)
 
@@ -322,6 +323,13 @@ VISION_GUIDE = """## 색상-부표 규약 (본 코스 실측 기준, IALA와 반
 - `front_distribution`에서 "좌우에 물체, 정중앙 비어있음" 패턴이면 통과 가능
 - 카메라에서 색상 확인까지 되면 확신을 갖고 `gate_pass` 실행
 - 장애물 회피가 부표를 피하려 할 때: 부표 사이 공간이 충분하면 직진 명령으로 override
+
+**부표 하나만 보일 때 (중요!)**:
+- 카메라에 녹색 또는 적색 부표 중 하나만 보이면, 반대편에 다른 부표가 있다고 추론
+- 녹색만 보임 → 녹색 부표의 **오른쪽**이 통로 (적색이 더 오른쪽에 있을 것)
+- 적색만 보임 → 적색 부표의 **왼쪽**이 통로 (녹색이 더 왼쪽에 있을 것)
+- `front_distribution`에서 해당 부표 방향만 장애물 → 반대 방향으로 5~8m 우회해서 직진
+- 절대 부표에 부딪히지 말 것: 부표 방향의 클러스터를 피해 반대편 빈 공간으로 진행
 """
 
 
@@ -582,12 +590,13 @@ def get_mission_waypoints_text():
 
         lines = ["## 미션 웨이포인트 (로컬 좌표)"]
         lines.append("```")
-        for i, (x, y, name, desc, requires_llm) in enumerate(waypoints, 1):
+        for i, (x, y, heading, name, desc, requires_llm) in enumerate(waypoints, 1):
             tag = "[LLM/비전]" if requires_llm else "[자동 전환]"
-            lines.append(f"{i}. {tag} {name}: ({x:.1f}, {y:.1f}) - {desc}")
+            hdg = f", heading={heading:.1f}°" if heading is not None else ""
+            lines.append(f"{i}. {tag} {name}: ({x:.1f}, {y:.1f}{hdg}) - {desc}")
         lines.append("```")
         return "\n".join(lines)
-    except Exception as e:
+    except (ImportError, KeyError, ValueError) as e:
         return f"(웨이포인트 로드 실패: {e})"
 
 

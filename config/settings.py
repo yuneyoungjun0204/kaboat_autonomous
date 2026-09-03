@@ -189,32 +189,45 @@ MISSION_WAYPOINTS_GPS = {
     'start': {
         'lat': -33.72276217109793,
         'lon': 150.67402781112585,
-        'desc': '시작점'
+        'desc': '시작점',
+        'requires_llm': False,
     },
+    # 2026-09-02 실측: 시뮬레이터에서 각 미션 구간 지점에 직접 도달해
+    # GPS/IMU(쿼터니언→yaw, ENU 기준 0°=동쪽/90°=북쪽)를 읽어 갱신.
     'gate_start': {
-        'lat': -33.72264316313711,
-        'lon': 150.67398440184970,
-        'desc': '게이트 통과 시작점'
+        'lat': -33.72269262,
+        'lon': 150.67397336,
+        'heading': 85.6,
+        'desc': '게이트 통과 시작점',
+        'requires_llm': True,   # 카메라로 적/녹 부표 인식 후 gate_pass 필요
     },
     'gate_end': {
-        'lat': -33.72190811726158,
-        'lon': 150.67398512188350,
-        'desc': '게이트 통과 끝점'
+        'lat': -33.72189802,
+        'lon': 150.67397480,
+        'heading': 85.5,
+        'desc': '게이트 통과 끝점',
+        'requires_llm': False,  # gate_pass 완료 후 자동 도달
     },
     'buoy_orbit': {
-        'lat': -33.72165457255059,
-        'lon': 150.67401729412393,
-        'desc': '부표선회 시작 지점'
+        'lat': -33.72155249,
+        'lon': 150.67425373,
+        'heading': -80.0,
+        'desc': '부표선회 시작 지점',
+        'requires_llm': True,   # 카메라로 지정 색상 부표 탐색 필요
     },
     'hopping': {
-        'lat': -33.72175726537696,
-        'lon': 150.67449697363470,
-        'desc': '호핑투어'
+        'lat': -33.72170388,
+        'lon': 150.67452439,
+        'heading': -87.0,
+        'desc': '호핑투어',
+        'requires_llm': False,  # 카메라 불필요 (MISSION_NEEDS_CAMERA['hopping_tour']=False)
     },
     'obstacle_end_dock_start': {
-        'lat': -33.72256299430913,
-        'lon': 150.67453407868342,
-        'desc': '장애물 회피 끝 / 도킹 시작 (호핑투어 끝에서 여기까지 장애물 회피)'
+        'lat': -33.72259378,
+        'lon': 150.67455630,
+        'heading': -86.8,
+        'desc': '장애물 회피 끝 / 도킹 시작 (호핑투어 끝에서 여기까지 장애물 회피)',
+        'requires_llm': True,   # 도킹은 카메라로 도킹 스테이션 인식 필요
     },
 }
 
@@ -232,7 +245,8 @@ MISSION_SEQUENCE = [
 def get_mission_waypoints_local():
     """
     미션 웨이포인트를 로컬 좌표(ENU)로 변환하여 반환
-    Returns: [(x, y, name, desc), ...]
+    Returns: [(x, y, heading, name, desc, requires_llm), ...]
+    heading은 없으면 None (ENU 기준, 0°=동쪽, 90°=북쪽)
     """
     waypoints = []
     for name in MISSION_SEQUENCE:
@@ -240,12 +254,14 @@ def get_mission_waypoints_local():
         utm_x, utm_y, _ = latlon_to_utm(wp['lat'], wp['lon'])
         local_x = utm_x - REF_UTM_X
         local_y = utm_y - REF_UTM_Y
-        waypoints.append((local_x, local_y, name, wp['desc']))
+        waypoints.append((local_x, local_y, wp.get('heading'), name, wp['desc'], wp.get('requires_llm', False)))
     return waypoints
 
 
 def print_mission_waypoints():
     """미션 웨이포인트 출력 (디버그용)"""
     print("=== 미션 웨이포인트 (로컬 좌표) ===")
-    for x, y, name, desc in get_mission_waypoints_local():
-        print(f"  {name}: ({x:.1f}, {y:.1f}) - {desc}")
+    for x, y, heading, name, desc, requires_llm in get_mission_waypoints_local():
+        tag = "[LLM/비전]" if requires_llm else "[자동]"
+        hdg = f"{heading:.1f}°" if heading is not None else "-"
+        print(f"  {tag} {name}: ({x:.1f}, {y:.1f}) hdg={hdg} - {desc}")

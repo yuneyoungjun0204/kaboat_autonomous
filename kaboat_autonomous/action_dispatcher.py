@@ -94,6 +94,8 @@ class ActionDispatcher(Node):
         self.status_pub = self.create_publisher(String, '/action_status', 10)
         self.lidar_pub = self.create_publisher(String, '/lidar_summary', 10)
         self.waypoint_pub = self.create_publisher(PointStamped, '/waypoint_goal', 10)
+        self.reasoning_pub = self.create_publisher(String, '/llm_reasoning', 10)
+        self.vision_pub = self.create_publisher(String, '/vision_analysis', 10)
 
         # === Subscribers ===
         self.create_subscription(NavSatFix, '/wamv/sensors/gps/fix', self.gps_callback, 10)
@@ -158,6 +160,26 @@ class ActionDispatcher(Node):
             cmd = json.loads(msg.data)
             action = cmd.get('action', '')
             self.get_logger().info(f'[LLM] Action received: {action}')
+
+            # LLM 추론 내용 발행 (웹 시각화용)
+            if 'reasoning' in cmd:
+                reasoning_msg = String()
+                reasoning_msg.data = json.dumps({
+                    'timestamp': time.time(),
+                    'action': action,
+                    'reasoning': cmd['reasoning'],
+                    'confidence': cmd.get('confidence', 1.0)
+                })
+                self.reasoning_pub.publish(reasoning_msg)
+
+            # 이미지 분석 결과 발행 (웹 시각화용)
+            if 'vision_analysis' in cmd:
+                vision_msg = String()
+                vision_msg.data = json.dumps({
+                    'timestamp': time.time(),
+                    'detections': cmd['vision_analysis']
+                })
+                self.vision_pub.publish(vision_msg)
 
             # 미션 로깅
             if self.logger:

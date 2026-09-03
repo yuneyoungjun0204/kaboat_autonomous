@@ -691,9 +691,17 @@ def annotate_cluster_rejection(boat: Boat, clusters: List[dict], rejected_points
     return annotated
 
 
-def analyze_lidar(boat: Boat) -> dict:
+def analyze_lidar(boat: Boat, points_3d: np.ndarray = None) -> dict:
     """
     LiDAR 데이터 요약 (LLM이 상황 판단에 사용).
+
+    Args:
+        boat: 보트 상태 (2D boat.scan 기반 섹터 분석/폴백 클러스터링에 사용)
+        points_3d: (N,3) 3D 포인트클라우드가 신선하면 전달 (호출자가 staleness
+            판단). 주어지면 클러스터는 detect_lidar_clusters_3d()로 계산되고,
+            None이면 기존 2D detect_lidar_clusters()로 폴백한다
+            (cluster_visualizer.py와 동일한 3D 우선/2D 폴백 방식을
+            2026-08-26부터 실제 미션 파이프라인에도 적용).
 
     Returns:
         {
@@ -761,7 +769,11 @@ def analyze_lidar(boat: Boat) -> dict:
             })
 
     # 클러스터 정보 (LLM이 대상 물체로 정렬 가능하게 상세 정보)
-    clusters = detect_lidar_clusters(boat)
+    # 3D 포인트클라우드가 신선하면 우선 사용, 아니면 2D LaserScan으로 폴백
+    if points_3d is not None:
+        clusters = detect_lidar_clusters_3d(points_3d)
+    else:
+        clusters = detect_lidar_clusters(boat)
     # 클러스터에 ID 부여 (LLM이 참조 가능)
     for i, c in enumerate(clusters):
         c['id'] = i
@@ -776,5 +788,6 @@ def analyze_lidar(boat: Boat) -> dict:
         },
         'front_distribution': front_sectors,
         'obstacle_count': int(np.sum(valid)),
-        'clusters': clusters
+        'clusters': clusters,
+        'cluster_source': '3d' if points_3d is not None else '2d',
     }

@@ -158,6 +158,7 @@ class SensorFusion(Node):
                 'last_action_result': self.action_status.get('last_action_result'),
                 'retry_count': self.action_status.get('retry_count', {})
             },
+            'mission_phase': self.action_status.get('mission_phase', {}),
             # action_dispatcher가 계산한 값을 그대로 전달 (진행 중인 액션이 없을 때만 true)
             'decision_needed': self.action_status.get('decision_needed', True)
         }

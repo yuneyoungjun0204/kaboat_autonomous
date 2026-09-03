@@ -110,10 +110,19 @@ class MotorController(Node):
         turn_cap = self.turn_cap(psi_error, max_sat)
         tau_n = max(-turn_cap, min(turn_cap, tau_n))
 
+        # 속도 배율 적용 (설정 파일에서 동적 로드)
+        try:
+            import importlib
+            from config import settings as S
+            importlib.reload(S)
+            speed_mult = getattr(S, 'SPEED_MULTIPLIER', 1.0)
+        except:
+            speed_mult = 1.0
+
         # 차동 추진 계산 (WAM-V: 좌/우 스러스터)
         # 반시계방향 회전: right > left
-        thrust_left = tau_x - tau_n * 0.5
-        thrust_right = tau_x + tau_n * 0.5
+        thrust_left = (tau_x - tau_n * 0.5) * speed_mult
+        thrust_right = (tau_x + tau_n * 0.5) * speed_mult
 
         # 정지 상태
         if psi_error == 0 and tau_x == 0:
