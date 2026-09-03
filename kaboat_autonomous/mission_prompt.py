@@ -410,11 +410,14 @@ def generate_mission_context(mission_type: str, params: dict = None) -> str:
 1. `clusters` 확인 → 있으면 가장 가까운 클러스터로 `align` (없으면 `dorodori`)로 도킹 스테이션 탐색
 2. {color} 마커/도형 식별
 3. 도킹 베이 입구의 두 점 파악 → `gate_pass` 또는 좌표 직접 계산
-4. `navigate_direct`로 저속 접근
+4. `navigate_direct`로 저속 접근 - 반드시 `"thrust"` 파라미터를 낮게 지정할 것
+   (예: `{{"action":"navigate_direct","goal_x":..,"goal_y":..,"thrust":600}}` -
+   생략하면 기본 순항 추력(NORMAL_THRUST=1000)으로 접근해 너무 빠르다).
+   더 정밀한 최종 접근이 필요하면 400까지 낮출 수 있다.
 5. `hover` 3초로 정박 완료
 
 안전 규칙:
-- 접근 속도 낮게 유지
+- 접근 속도 낮게 유지 (위 4번 thrust 파라미터로 제어)
 - 충돌 위험 시 `backward` 후 재접근
 - 벽면 감지 시 `hover`로 위치 유지
 """
