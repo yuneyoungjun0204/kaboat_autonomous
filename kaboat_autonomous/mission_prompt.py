@@ -242,16 +242,24 @@ navigate_avoid를 발행한다 - 이 구간에서는 LLM이 아무것도 안 해
   `mission_auto_pause`로 멈추고 직접 액션을 내린 뒤, 다시 자동 진행시키려면
   `mission_auto_resume` 호출
 
-## 응답 형식
+## 액션 실행 방법 - 반드시 도구를 호출할 것, 텍스트로 출력만 하지 말 것
 
-상황을 분석한 후, 다음 액션을 JSON으로 출력하세요:
+위 모듈들은 JSON을 응답 텍스트에 출력하는 게 아니라, ros-mcp의 publish_once 도구를
+**실제로 호출해서** `/llm_action` 토픽에 발행해야 실행된다:
 
-```json
-{
-  "reasoning": "현재 상황 분석 및 판단 근거",
-  "action": "선택한 액션 JSON"
-}
-```
+mcp__ros-mcp__publish_once(topic="/llm_action", msg_type="std_msgs/String", msg={"data": "<액션 JSON을 문자열로>"})
+
+예시: `{"action": "navigate_avoid", "goal_x": 10.0, "goal_y": 20.0}`을 실행하려면
+publish_once(topic="/llm_action", msg_type="std_msgs/String", msg={"data": "{\\"action\\": \\"navigate_avoid\\", \\"goal_x\\": 10.0, \\"goal_y\\": 20.0}"})를 호출한다.
+`/action_status`, `/lidar_summary` 등 상태 확인은 mcp__ros-mcp__subscribe_once로 조회한다.
+
+## 미션이 실제로 끝날 때까지 도구 호출을 반복할 것
+
+이 실행은 단발 대화가 아니다. 상황 분석·계획을 텍스트로 한 번 설명하고 끝내지 말 것 -
+"상태 확인(subscribe_once) → 판단 → 액션 발행(publish_once) → 진행 대기 후 재확인"을
+미션이 실제로 완료될 때까지(비전이 필요한 구간이면 mission_phase_done을 호출해 자동
+전환이 재개되는 것까지 확인) 반복해서 도구를 호출하라. 첫 판단만 내리고 도구 호출 없이
+멈추면 보트는 아무것도 하지 않은 채로 프로세스만 종료된다.
 """
 
 # JSON 예시의 중괄호와 섞이지 않도록 별도 f-string으로 만들어 CORE_PROMPT_BODY에
