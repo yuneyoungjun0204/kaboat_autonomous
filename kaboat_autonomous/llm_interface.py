@@ -22,9 +22,7 @@ import json
 import time
 import sys
 import os
-import base64
 import cv2
-import threading
 
 # HSV 색상 감지기
 sys.path.insert(0, '/home/yune/ros-mcp-server/kaboat_llm/perception')
@@ -34,27 +32,6 @@ try:
 except ImportError:
     HSV_AVAILABLE = False
     print("[WARN] color_detector not found, HSV mode disabled")
-
-# .env 파일에서 API 키 로드
-from pathlib import Path
-for env_path in [
-    Path('/home/yune/ros-mcp-server/kaboat_llm/web/.env'),
-    Path.home() / '.env',
-]:
-    if env_path.exists():
-        for line in env_path.read_text().strip().split('\n'):
-            if '=' in line and not line.startswith('#'):
-                key, val = line.split('=', 1)
-                os.environ.setdefault(key.strip(), val.strip())
-        break
-
-# Gemini API
-try:
-    import google.generativeai as genai
-    GEMINI_AVAILABLE = True
-except ImportError:
-    GEMINI_AVAILABLE = False
-    print("[WARN] google-generativeai not installed, autonomous mode disabled")
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -108,13 +85,15 @@ class LLMInterfaceNode(Node):
         self.ref_utm_y = SETTINGS.REF_UTM_Y
 
         # === 자율 모드 ===
+        # Gemini 폴백은 제거됨(모든 LLM 판단은 ros-mcp로 연결된 Haiku만 쓴다는
+        # 원칙 - 실제 미션은 dashboard_ros_integrated.py + action_dispatcher.py
+        # 경로로 이미 처리되고, 이 자율 루프는 그쪽과 별개인 미사용 경로였음).
+        # HSV 로컬 판단만 남는다.
         self.autonomous_mode = False
-        self.autonomous_interval = 0.5  # 초 (최대 2Hz - Gemini API 제한 고려)
+        self.autonomous_interval = 0.5  # 초
         self.last_autonomous_time = 0.0
         self.cv_bridge = CvBridge()
         self.current_image = None
-        self.current_image_base64 = None
-        self.gemini_model = None
         self.autonomous_log = []  # 최근 판단 로그
         self.max_log_entries = 20
 
@@ -125,19 +104,10 @@ class LLMInterfaceNode(Node):
 
         # HSV 감지기 초기화
         self.hsv_detector = None
-        self.use_hsv_mode = False  # HSV 비활성화, Gemini 비전만 사용
+        self.use_hsv_mode = False  # 비활성 상태 그대로 유지 (재활성화는 별도 결정 필요)
         if HSV_AVAILABLE:
             self.hsv_detector = ColorBuoyDetector(min_area=300, enabled_colors=['red', 'green', 'yellow', 'blue'])
             self.get_logger().info('[AUTONOMOUS] HSV detector initialized')
-
-        # Gemini API 설정 (HSV 실패 시 폴백)
-        if GEMINI_AVAILABLE:
-            api_key = os.environ.get('GOOGLE_API_KEY') or os.environ.get('GEMINI_API_KEY')
-            if api_key:
-                genai.configure(api_key=api_key)
-                self.gemini_model = genai.GenerativeModel('gemini-3.5-flash-lite')
-                self.get_logger().info('[AUTONOMOUS] Gemini API configured (fallback)')
-
         # === Publishers ===
         self.status_pub = self.create_publisher(String, '/boat_status', 10)
         self.waypoint_pub = self.create_publisher(PointStamped, '/waypoint_goal', 10)
@@ -260,15 +230,9 @@ class LLMInterfaceNode(Node):
             self.get_logger().error(f'[LLM] Invalid override JSON: {msg.data}')
 
     def camera_callback(self, msg: Image):
-        """카메라 이미지 수신 및 Base64 변환"""
+        """카메라 이미지 수신"""
         try:
-            cv_image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-            self.current_image = cv_image
-
-            # 리사이즈 후 JPEG 압축
-            resized = cv2.resize(cv_image, (320, 240))
-            _, buffer = cv2.imencode('.jpg', resized, [cv2.IMWRITE_JPEG_QUALITY, 70])
-            self.current_image_base64 = base64.b64encode(buffer).decode('utf-8')
+            self.current_image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         except Exception as e:
             self.get_logger().error(f'Camera callback error: {e}')
 
@@ -279,8 +243,8 @@ class LLMInterfaceNode(Node):
             action = data.get('action', '')
 
             if action == 'start':
-                if not self.gemini_model:
-                    self.get_logger().error('[AUTONOMOUS] Gemini not configured')
+                if not self.hsv_detector:
+                    self.get_logger().error('[AUTONOMOUS] HSV detector not available')
                     return
                 self.autonomous_mode = True
                 self.mission_status = 'running'
@@ -298,7 +262,8 @@ class LLMInterfaceNode(Node):
             self.get_logger().error(f'Invalid autonomous control: {msg.data}')
 
     def autonomous_loop(self):
-        """자율 판단 루프 - HSV 우선, Gemini 폴백"""
+        """자율 판단 루프 - HSV 로컬 판단만 (Gemini 폴백은 제거됨, 클래스
+        docstring 상단 참고)."""
         if not self.autonomous_mode:
             return
 
@@ -308,14 +273,8 @@ class LLMInterfaceNode(Node):
 
         self.last_autonomous_time = now
 
-        # HSV 모드 (빠름, 로컬)
         if self.use_hsv_mode and self.hsv_detector and self.current_image is not None:
             self._run_hsv_analysis()
-            return
-
-        # Gemini 폴백 (느림, API)
-        if self.gemini_model and self.current_image_base64:
-            threading.Thread(target=self._run_autonomous_analysis, daemon=True).start()
 
     def _run_hsv_analysis(self):
         """HSV 기반 규칙 판단 (빠름, 로컬)"""
@@ -411,74 +370,6 @@ class LLMInterfaceNode(Node):
         except Exception as e:
             self._log_autonomous(f'HSV 분석 오류: {e}', 'error')
             self.get_logger().error(f'[HSV] Analysis error: {e}')
-
-    def _run_autonomous_analysis(self):
-        """Gemini로 상황 분석 및 명령 결정 (action_dispatcher 활용) - 폴백용"""
-        try:
-            # 현재 상태 요약
-            current_mission = self.mission_sequence[self.current_mission_index] if self.current_mission_index < len(self.mission_sequence) else 'completed'
-
-            prompt = f"""KABOAT 자율주행 보트의 현재 상황을 분석하고 다음 행동을 결정하세요.
-
-현재 미션: {current_mission}
-위치: x={self.position[0]:.1f}m, y={self.position[1]:.1f}m
-헤딩: {self.heading:.1f}도
-장애물 (LiDAR):
-  - 전방: {self.lidar_summary.get('front', 999):.1f}m
-  - 좌측: {self.lidar_summary.get('left', 999):.1f}m
-  - 우측: {self.lidar_summary.get('right', 999):.1f}m
-  - 가장 가까운: {self.lidar_summary.get('closest', 999):.1f}m
-웨이포인트: {self.current_waypoint}
-Stuck 상태: {self.is_stuck}
-
-미션 목표:
-- gate_search: 빨간/초록 게이트 찾아서 통과
-- buoy_orbit: 빨간 부표 주변을 시계방향으로 선회
-- hopping_tour: 웨이포인트 순회
-- docking: 도킹 스테이션에 정박
-
-사용 가능한 액션 (action_dispatcher 명령):
-1. navigate_avoid: 장애물 회피하며 목표로 이동 - {{"action":"navigate_avoid","goal_x":숫자,"goal_y":숫자}}
-2. navigate_direct: 직선 이동 - {{"action":"navigate_direct","goal_x":숫자,"goal_y":숫자}}
-3. orbit: 부표 선회 - {{"action":"orbit","lidar_idx":각도(0-359),"radius":반경,"direction":"cw"또는"ccw","laps":바퀴수}}
-4. gate_pass: 게이트 통과 - {{"action":"gate_pass","left_idx":왼쪽각도,"right_idx":오른쪽각도}}
-5. dorodori: 좌우 스캔 탐색 - {{"action":"dorodori","duration":초,"half_range":각도범위}}
-6. align: 특정 방향 정렬 - {{"action":"align","heading":목표헤딩}}
-7. align_to_cluster: LiDAR 클러스터 방향 정렬 - {{"action":"align_to_cluster","cluster_id":번호}}
-8. hover: 현재 위치 유지 - {{"action":"hover","duration":초}}
-9. backward: 후진 - {{"action":"backward","duration":초}}
-10. stop: 정지 - {{"action":"stop"}}
-11. mission_phase_done: 현재 미션 단계 완료 - {{"action":"mission_phase_done"}}
-
-JSON 형식으로 응답:
-{{"analysis": "상황 분석 (1-2문장)", "action": "액션명", "params": {{액션파라미터들}}, "mission_complete": true/false}}"""
-
-            # 이미지와 함께 API 호출
-            image_data = base64.b64decode(self.current_image_base64)
-            response = self.gemini_model.generate_content([
-                prompt,
-                {"mime_type": "image/jpeg", "data": image_data}
-            ])
-
-            # 응답 파싱
-            response_text = response.text
-            self._log_autonomous(f'Gemini: {response_text[:100]}...', 'gemini')
-
-            # JSON 추출
-            try:
-                # JSON 부분만 추출
-                json_start = response_text.find('{')
-                json_end = response_text.rfind('}') + 1
-                if json_start >= 0 and json_end > json_start:
-                    json_str = response_text[json_start:json_end]
-                    decision = json.loads(json_str)
-                    self._execute_decision(decision)
-            except json.JSONDecodeError:
-                self._log_autonomous(f'JSON 파싱 실패: {response_text[:50]}', 'error')
-
-        except Exception as e:
-            self._log_autonomous(f'분석 오류: {str(e)}', 'error')
-            self.get_logger().error(f'[AUTONOMOUS] Analysis error: {e}')
 
     def _execute_decision(self, decision: dict):
         """LLM 판단 결과 실행 - action_dispatcher로 명령 전달"""
