@@ -93,13 +93,6 @@ CORE_PROMPT_BODY = """# KABOAT 자율주행 미션 수행 시스템
 // 카메라로 인식한 부표가 있고 LiDAR 클러스터와 매칭될 때 사용
 {"action": "align_to_cluster", "cluster_id": 0, "tolerance": 5.0, "timeout": 10.0}
 
-// 카메라 방위각만으로 전진 (클러스터가 아직 안 잡힐 때)
-// 화면에 타깃이 살짝이라도 보이는데 매칭되는 LiDAR 클러스터가 없으면
-// (사거리 밖, 얇은 물체 등) align/dorodori로 그 자리에서 계속 재탐색하지
-// 말고 이걸로 일단 거리를 좁힌다. bearing_deg는 보트 기준 상대각
-// (화면 X좌표 → 각도 변환과 동일한 컨벤션: 0=정면, 양수=좌, 음수=우)
-{"action": "advance_bearing", "bearing_deg": 15.0, "distance": 20.0}
-
 // 좌우 스캔 (align으로 정렬할 클러스터가 없을 때의 광역 탐색 폴백)
 // center_heading: 스윕 기준각(절대 헤딩, 도) - 시작 시점에 한 번만 고정됨
 {"action": "dorodori", "center_heading": 45.0, "duration": 8.0, "half_range": 30.0}
@@ -120,7 +113,7 @@ CORE_PROMPT_BODY = """# KABOAT 자율주행 미션 수행 시스템
 {"action": "gate_pass", "left_idx": 45, "right_idx": 315}
 
 // 부표 궤도 (LiDAR 점 주위 선회)
-{"action": "orbit", "lidar_idx": 90, "radius": 8.0, "direction": "cw", "laps": 1.0}
+{"action": "orbit", "lidar_idx": 90, "radius": 12.0, "direction": "cw", "laps": 1.0}
 
 // 웨이포인트 리스트 (호핑투어)
 {"action": "waypoints", "waypoints": [{"x": 10, "y": 20}, {"x": 30, "y": 40}]}
@@ -137,14 +130,9 @@ CORE_PROMPT_BODY = """# KABOAT 자율주행 미션 수행 시스템
 // 클러스터가 타깃이 아님을 기록 (전역 좌표로 저장, 재탐색 방지)
 {"action": "reject_cluster", "angle": 42.5, "distance": 10.0, "reason": "not_green_buoy"}
 
-// 비전이 필요한 미션 단계(게이트 통과/부표선회/도킹)를 마쳤음을 알림
-// - 반드시 호출해야 다음 자동 구간 전환이 재개됨 (아래 "미션 구간 자동
-// 전환" 참고)
-{"action": "mission_phase_done"}
-
-// 구간 자동 전환을 일시 정지/재개 (수동 개입이 필요할 때)
-{"action": "mission_auto_pause"}
-{"action": "mission_auto_resume"}
+// mission_phase_done / mission_auto_pause / mission_auto_resume:
+// **이 실행 경로에서는 절대 호출하지 말 것** - 이유는 아래
+// "action_status의 mission_phase / mission_phase_idx 필드에 대해" 참고.
 ```
 
 ## LiDAR 인덱스 규약
@@ -179,7 +167,7 @@ CORE_PROMPT_BODY = """# KABOAT 자율주행 미션 수행 시스템
      진행 방향(현재 미션 구간 목표) 쪽을 우선 훑고 싶으면
      `center_bearing_to_goal: true`를 사용
 
-## 카메라엔 보이는데 클러스터가 안 잡힐 때 → advance_bearing (제자리 맴돌기 금지)
+## 카메라엔 보이는데 클러스터가 안 잡힐 때 (제자리 맴돌기 금지)
 
 `clusters`에 매칭되는 게 없어도 카메라 화면에 타깃이 살짝이라도 걸려 있으면
 (부표 일부만 보임, 화면 가장자리 등) **align/dorodori로 그 자리에서 계속
@@ -187,15 +175,16 @@ CORE_PROMPT_BODY = """# KABOAT 자율주행 미션 수행 시스템
 클러스터 최대 탐지 거리보다 멀 수 있음) 물체가 얇아서 안 잡히는 경우가
 많고, 제자리에서 맴돌기만 해서는 절대 해결되지 않는다.
 
-대신:
+방법:
 1. 화면 X좌표를 각도로 변환 (`lidar_angle = (640 - image_x) / 640 * 40`,
    1280px 기준 - CAMERA_HALF_FOV_DEG 사용)
-2. `advance_bearing`으로 그 방향 그대로 전진 (기본 20m) - 실제 거리를
-   좁혀야 클러스터 탐지 범위 안으로 들어오거나 카메라 각도 추정이 더
-   정확해진다
-3. 전진 후 다시 카메라/clusters 확인 → 클러스터가 잡히면 이제 `align_to_cluster`나
-   `orbit` 등 정상 절차로 전환, 여전히 안 잡히면 다시 새 방위각으로 `advance_bearing`
-   (같은 방향으로 무한 반복하지 말고, 매번 최신 카메라 이미지 기준으로 방위각 재계산)
+2. `heading = 현재 헤딩(IMU) + lidar_angle`로 절대 방향을 구하고, 그 방향으로
+   적당히(예: 15~20m) 떨어진 지점의 좌표를 `goal_x = 현재x + 거리*cos(heading),
+   goal_y = 현재y + 거리*sin(heading)`로 계산해 `navigate_avoid`로 이동한다
+   (LiDAR 장애물을 자동으로 피하면서 거리를 좁힌다)
+3. 이동 후 다시 카메라/clusters 확인 → 클러스터가 잡히면 이제 `align_to_cluster`나
+   `orbit` 등 정상 절차로 전환, 여전히 안 잡히면 다시 최신 카메라 이미지 기준으로
+   방향을 재계산해 반복 (같은 방향으로 무한 반복하지 말 것)
 
 ## LiDAR 데이터 분석 시
 - `front_clear: true` → 전방 10m 이내 장애물 없음
@@ -225,22 +214,19 @@ CORE_PROMPT_BODY = """# KABOAT 자율주행 미션 수행 시스템
   전환 (예: align이 계속 timeout → dorodori로 전환, orbit이 계속
   failed_no_lidar → 더 가까이 접근 후 재시도)
 
-## 미션 구간 자동 전환 (mission_phase)
-순수 이동 구간(비전 불필요)은 action_dispatcher가 알아서 다음 지점까지
-navigate_avoid를 발행한다 - 이 구간에서는 LLM이 아무것도 안 해도 된다.
-`mission_phase.requires_llm`가 `true`인 지점(게이트 통과/부표선회/도킹
-시작점)에 도착했을 때만 `decision_needed:true`와 함께 LLM에게 넘어온다.
-
-- `mission_phase.name` / `requires_llm`으로 지금 자동 전환 중인지(false),
-  비전 작업이 필요한 지점에 막 도착했는지(true) 확인
-- `requires_llm:true`인 지점에서 비전 작업(게이트 통과/부표선회/도킹)을
-  **완료한 뒤에는 반드시 `mission_phase_done`을 호출**할 것 - 안 부르면
-  자동 전환이 그 지점에서 영원히 멈춰있는다
-- `requires_llm:false`(자동 전환 중)일 때는 `mission_phase_done`을 호출할
-  필요 없음 - 이미 자동으로 진행 중
-- 예상과 다른 위치에서 자동 전환이 멈췄거나 개입이 필요하면
-  `mission_auto_pause`로 멈추고 직접 액션을 내린 뒤, 다시 자동 진행시키려면
-  `mission_auto_resume` 호출
+## action_status의 mission_phase / mission_phase_idx 필드에 대해
+이 필드는 action_dispatcher의 순차 웨이포인트 자동전환 상태기계(전체 미션을
+순서대로 도는 용도) 전용이며, 이 실행 경로(대시보드가 미션을 시작/진행시킴)에서는
+그 상태기계가 시작되지도, 진행되지도 않는다 - 항상 최초값(첫 웨이포인트 이름)에
+고정돼 보인다. **지금 무슨 미션을 하고 있는지, 다음에 뭘 해야 하는지에 대한
+신호로 이 필드를 참고하거나 언급하지 말 것** - 예를 들어 `mission_phase`가
+"gate_start"로 보인다고 해서 게이트 통과로 전환해야 한다는 뜻이 아니다. 지금
+무슨 미션인지는 이 프롬프트 상단의 "현재 미션" 섹션만 근거로 삼을 것.
+**그 상태기계를 직접 건드리는 `mission_phase_done`/`mission_auto_pause`/
+`mission_auto_resume` 액션도 이 실행 경로에서는 절대 호출하지 말 것** -
+시작돼 있지 않은 상태기계를 호출로 깨우면 보트가 지금 미션과 무관하게 다음
+웨이포인트로 이탈한다 (2026-09-07: 정확히 이 방식으로 보트가 3분간 엉뚱한
+방향으로 항해한 사고 실측 이후 명시).
 
 ## 액션 실행 방법 - 반드시 도구를 호출할 것, 텍스트로 출력만 하지 말 것
 
@@ -257,15 +243,26 @@ publish_once(topic="/llm_action", msg_type="std_msgs/String", msg={"data": "{\\"
 
 이 실행은 단발 대화가 아니다. 상황 분석·계획을 텍스트로 한 번 설명하고 끝내지 말 것 -
 "상태 확인(subscribe_once) → 판단 → 액션 발행(publish_once) → 진행 대기 후 재확인"을
-미션이 실제로 완료될 때까지(비전이 필요한 구간이면 mission_phase_done을 호출해 자동
-전환이 재개되는 것까지 확인) 반복해서 도구를 호출하라. 첫 판단만 내리고 도구 호출 없이
-멈추면 보트는 아무것도 하지 않은 채로 프로세스만 종료된다.
+미션이 실제로 완료될 때까지(이 프롬프트의 "현재 미션" 섹션에 명시된 완료 조건을
+충족할 때까지 - mission_phase_done 호출과는 무관함, 위 "mission_phase 필드에
+대해" 참고) 반복해서 도구를 호출하라. 첫 판단만 내리고 도구 호출 없이 멈추면
+보트는 아무것도 하지 않은 채로 프로세스만 종료된다.
 """
 
 # JSON 예시의 중괄호와 섞이지 않도록 별도 f-string으로 만들어 CORE_PROMPT_BODY에
 # 삽입한다 (값이 SETTINGS에서 오므로 하드코딩 드리프트 방지).
 _CAMERA_TIMING_SECTION = f"""## 카메라 확인 타이밍 (align 중 언제 사진을 찍을지)
-카메라는 전방 1대(`/wamv/sensors/camera/image_raw`), 반시야각 ≈ {SETTINGS.CAMERA_HALF_FOV_DEG:.0f}°다.
+카메라는 전방 1대, 반시야각 ≈ {SETTINGS.CAMERA_HALF_FOV_DEG:.0f}°다. 사진을 볼 때는 반드시
+아래 압축(JPEG) 토픽을 구독할 것 - 비압축 `/wamv/sensors/camera/image_raw`는
+프레임당 ~3.7MB라 subscribe_once가 거의 항상 타임아웃난다(실측 확인됨):
+
+mcp__ros-mcp__subscribe_once(
+    topic="/world/kaboat_course/model/wamv/link/wamv/base_link/sensor/front_left_camera_sensor/image/compressed",
+    msg_type="sensor_msgs/CompressedImage",
+    expects_image="true",
+    timeout=10
+)
+
 `cluster.center_angle`은 보트 기준 상대각이라 카메라 중심(보트 정면)과 바로
 비교 가능 - `|center_angle| < {SETTINGS.CAMERA_HALF_FOV_DEG:.0f}°`면 지금 카메라
 시야 안에 있다는 뜻이다.
@@ -330,7 +327,9 @@ VISION_GUIDE = f"""## 색상-부표 규약 (본 코스 실측 기준, IALA와 �
 - 결정론적 `gate_detected`를 쓰지 않음 - 당신이 직접 판단하세요
 - `front_distribution`에서 "좌우에 물체, 정중앙 비어있음" 패턴이면 통과 가능
 - 카메라에서 색상 확인까지 되면 확신을 갖고 `gate_pass` 실행
-- 장애물 회피가 부표를 피하려 할 때: 부표 사이 공간이 충분하면 직진 명령으로 override
+- 게이트 미션에서는 애초에 `navigate_avoid`를 쓰지 않으므로(위 "현재 미션"
+  섹션 참고) 부표를 장애물로 오인해 피해가는 문제 자체가 발생하지 않는다 -
+  `gate_pass`/`navigate_direct`로 중앙을 그대로 통과할 것
 
 **부표 하나만 보일 때 (중요!)**:
 - 카메라에 녹색 또는 적색 부표 중 하나만 보이면, 반대편에 다른 부표가 있다고 추론
@@ -339,6 +338,35 @@ VISION_GUIDE = f"""## 색상-부표 규약 (본 코스 실측 기준, IALA와 �
 - `front_distribution`에서 해당 부표 방향만 장애물 → 반대 방향으로 5~8m 우회해서 직진
 - 절대 부표에 부딪히지 말 것: 부표 방향의 클러스터를 피해 반대편 빈 공간으로 진행
 """
+
+
+def _get_dock_start_heading():
+    """obstacle_end_dock_start 웨이포인트에 사전 측량된 헤딩(ENU, 0=동/90=북)을
+    반환. 도킹 스테이션 좌표 자체는 모르지만, 이 시작 지점에서 도킹 스테이션을
+    바라보는 방향은 코스 설계 시 미리 측량되어 있으므로 align/dorodori의 기준
+    각도로 재사용한다. 웨이포인트를 못 찾으면 None."""
+    try:
+        for _x, _y, heading, name, _desc, _requires_llm in SETTINGS.get_mission_waypoints_local():
+            if name == 'obstacle_end_dock_start':
+                return heading
+    except Exception:
+        pass
+    return None
+
+
+def _get_waypoint_local_xy(name):
+    """이름으로 미션 웨이포인트의 로컬 (x, y) 좌표를 찾는다. gate_search가
+    gate_pass 이후 navigate_direct로 실제 빠져나갈 목표점(gate_end)을 LLM에게
+    구체적인 좌표로 알려주기 위함 - 좌표 없이 "적당히 먼 곳으로"만 지시하면
+    모델이 gate_pass만 하고 멈추거나 애매한 방향으로 직진해 코스를 벗어나지
+    못하는 경우가 있었다. 못 찾으면 (None, None)."""
+    try:
+        for x, y, _heading, wp_name, _desc, _requires_llm in SETTINGS.get_mission_waypoints_local():
+            if wp_name == name:
+                return x, y
+    except Exception:
+        pass
+    return None, None
 
 
 def generate_mission_context(mission_type: str, params: dict = None) -> str:
@@ -350,11 +378,27 @@ def generate_mission_context(mission_type: str, params: dict = None) -> str:
 
 목표: 적색-녹색 게이트를 찾아 사이로 통과하세요.
 
-단계:
-1. 현재 이미지에서 적색/녹색 부표가 보이는지 확인
-2. 안 보이면 `clusters` 확인 → 있으면 가장 가까운 클러스터로 `align` (없으면 `dorodori`)
-3. 보이면 각 부표의 화면 위치에서 LiDAR 인덱스 추정
-4. `gate_pass`로 중간점 계산 후 통과
+**완료 조건 (중요): `gate_pass`로 중간점을 지나간 것만으로는 미션이 끝난 게
+아니다.** 카메라+LiDAR 융합 분석으로 두 부표를 실제로 "인식"해서 사이를
+통과한 뒤, ({gate_end_hint}) 지점까지 실제로 도달해 게이트 구조물 영역을
+완전히 벗어나야 완료다. gate_pass만 하고 도구 호출을 멈추지 말 것.
+
+**이 미션에서는 `navigate_avoid`를 쓰지 말 것** - LiDAR 회피 경로 계획은 부표를
+장애물로 여겨 피해가려 하므로, 게이트 중앙을 그대로 통과해야 하는 이 미션과
+상충한다. `gate_pass`가 이 미션의 주력 이동 수단이고, `align`/`dorodori`/
+`hover`/`backward`/`navigate_direct`는 게이트를 찾고 정렬·보정하기 위해
+상황에 맞게 섞어 쓰는 보조 액션이다.
+
+단계 (아래를 순서대로, 필요하면 반복하며 조합):
+1. 게이트가 안 보이면: `clusters` 확인 → 있으면 가장 가까운 클러스터로 `align`
+   (없으면 `dorodori`)로 탐색
+2. 이미지에서 적색/녹색 부표 위치 확인 → 화면 좌표를 LiDAR 인덱스로 변환
+3. 두 부표의 중간점이 계산되면 `gate_pass`로 게이트 진입 (이 미션의 핵심 액션)
+4. `gate_pass` 도중 정렬이 틀어지면 `align`로 재정렬 후 재시도, 대기가
+   필요하면 `hover`, stuck이면 `backward`로 벗어난 뒤 1번부터 재탐색
+5. `gate_pass` 완료 후 카메라/LiDAR로 좌우 부표가 더 이상 정면이 아니라 옆이나
+   뒤로 지나갔음을 확인한 다음, `navigate_direct`로 ({gate_end_hint})까지
+   똑바로 빠져나온다 - 이 지점 도착이 확인되어야 미션 완료로 간주한다
 
 힌트:
 - 녹색은 왼쪽(좌현), 적색은 오른쪽(우현)에 있어야 정상 진입 (이 코스는 IALA 반대 배치)
@@ -370,7 +414,7 @@ def generate_mission_context(mission_type: str, params: dict = None) -> str:
 1. 이미지에서 {color} 원형 부표 탐색
 2. 안 보이면 `clusters` 확인 → 있으면 가장 가까운 클러스터로 `align` (없으면 `dorodori`)
 3. 부표 방향의 LiDAR 인덱스 확인
-4. `orbit`으로 궤도 설정 (radius: 8m, direction: {direction})
+4. `orbit`으로 궤도 설정 (direction: {direction}) - radius는 생략해 기본값(12m)을 쓰거나 12 이상으로 직접 지정할 것
 5. 완료까지 대기
 
 힌트:
@@ -415,7 +459,11 @@ def generate_mission_context(mission_type: str, params: dict = None) -> str:
 목표: {color} 마커가 있는 도킹 스테이션에 진입하여 3초 정박하세요.
 
 단계:
-1. `clusters` 확인 → 있으면 가장 가까운 클러스터로 `align` (없으면 `dorodori`)로 도킹 스테이션 탐색
+0. 시작하자마자 `align` (heading: {dock_heading})으로 도킹 스테이션 방향에 먼저 정렬할 것
+   (obstacle_end_dock_start 웨이포인트에 사전 측량된 방향 - 도킹 스테이션 좌표는 몰라도
+   이 지점에서 바라봐야 할 방향은 이미 알고 있음)
+1. `clusters` 확인 → 있으면 가장 가까운 클러스터로 `align` (없으면 `dorodori`, center_heading: {dock_heading})로
+   도킹 스테이션 탐색 - 클러스터 방향이 아니라 이 사전 측량 방향을 기준으로 탐색할 것
 2. {color} 마커/도형 식별
 3. 도킹 베이 입구의 두 점 파악 → `gate_pass` 또는 좌표 직접 계산
 4. `navigate_direct`로 저속 접근 - 반드시 `"thrust"` 파라미터를 낮게 지정할 것
@@ -432,8 +480,22 @@ def generate_mission_context(mission_type: str, params: dict = None) -> str:
     }
 
     template = contexts.get(mission_type, "")
-    if params:
-        template = template.format(**params)
+    fmt_params = dict(params) if params else {}
+    if mission_type == 'docking':
+        heading = _get_dock_start_heading()
+        fmt_params.setdefault(
+            'dock_heading',
+            f"{heading:.1f}" if heading is not None else "현재 헤딩 유지 (웨이포인트 헤딩 없음)"
+        )
+    elif mission_type == 'gate_search':
+        gx, gy = _get_waypoint_local_xy('gate_end')
+        fmt_params.setdefault(
+            'gate_end_hint',
+            f"goal_x={gx:.1f}, goal_y={gy:.1f}" if gx is not None
+            else "웨이포인트 미설정 - hold_heading을 지정해 현재 방향으로 20m 이상 직진할 것"
+        )
+    if fmt_params:
+        template = template.format(**fmt_params)
     return template
 
 
@@ -632,7 +694,7 @@ obstacle_end_dock_start)은 action_dispatcher가 자동으로 navigate_avoid를
 4. **부표 선회** (카메라 필수) - 녹색(GREEN) 부표
    - clusters 있으면 align, 없으면 dorodori로 녹색 부표 탐색
    - 카메라에서 녹색 부표 위치 확인 → LiDAR 인덱스
-   - orbit 명령 (radius: 8m, direction: cw, 6 waypoints)
+   - orbit 명령 (radius: 12m, direction: cw, 6 waypoints)
    - 완료 후 `mission_phase_done` 호출
 5. **buoy_orbit → hopping → obstacle_end_dock_start 이동** (자동, 장애물 자동 회피 포함)
 6. **도킹** (카메라 필수)

@@ -233,6 +233,8 @@ class ActionDispatcher(Node):
                 self._advance_mission_phase(goto=cmd.get('goto'))
             elif action == 'advance_bearing':
                 self._init_advance_bearing(cmd)
+            elif action == 'dorodori':
+                self._init_dorodori(cmd)
             elif action == 'mission_auto_pause':
                 # CORE_PROMPT가 모든 미션에 문서화하는 액션인데 핸들러가 없으면
                 # current_action이 이 문자열로 영원히 고정돼 매 틱 0-추력만
@@ -246,13 +248,20 @@ class ActionDispatcher(Node):
                 self._record_result('mission_auto_pause', 'paused')
             elif action == 'mission_auto_resume':
                 self._resume_mission_phase()
+            elif action == 'set_goal_range':
+                self._set_goal_range(cmd)
+                self.current_action = None
 
         except json.JSONDecodeError as e:
             self.get_logger().error(f'Invalid JSON: {e}')
 
     # === 압축 상태(blackboard) 기록 ===
 
-    FAILURE_RESULTS = {'timeout', 'failed_no_lidar'}
+    # 2026-09-08: failed_no_cluster/failed_no_bearing가 빠져있으면 retry_count가
+    # 이 실패에서 계속 0으로 리셋돼(_record_result의 else 분기) LLM에게 노출되는
+    # retry_count[action] 가드레일(mission_prompt.py 참고)이 이 실패 유형을
+    # 못 봄 - align_to_cluster 수정 검증 중 architect 리뷰에서 발견.
+    FAILURE_RESULTS = {'timeout', 'failed_no_lidar', 'failed_no_cluster', 'failed_no_bearing'}
 
     def _record_result(self, action: str, result: str):
         """액션이 끝날 때 결과를 요약 기록. 실패면 재시도 카운트 증가, 성공이면 리셋."""
@@ -403,6 +412,25 @@ class ActionDispatcher(Node):
         self.auto_transit = True
         self._record_result('mission_auto_resume', f'resumed:{name}')
 
+    def _set_goal_range(self, cmd):
+        """웨이포인트 도착 판정 거리(m)를 실행 중에 바꾼다 - 대시보드의
+        사용자 입력을 받아 SETTINGS.GOAL_RANGE를 직접 갱신한다.
+        maneuvers.is_goal_reached()가 호출마다 SETTINGS.GOAL_RANGE를 새로
+        읽으므로(캐시된 지역 변수가 아님) 노드 재시작 없이 즉시 반영된다."""
+        try:
+            value = float(cmd.get('value'))
+        except (TypeError, ValueError):
+            self.get_logger().warn(f'set_goal_range: 잘못된 값 무시 - {cmd.get("value")!r}')
+            self._record_result('set_goal_range', 'invalid_value')
+            return
+        if value <= 0:
+            self.get_logger().warn(f'set_goal_range: 0 이하 값 무시 - {value}')
+            self._record_result('set_goal_range', 'invalid_value')
+            return
+        SETTINGS.GOAL_RANGE = value
+        self.get_logger().info(f'set_goal_range: 도착 판정 거리 -> {value}m')
+        self._record_result('set_goal_range', f'ok:{value}')
+
     def _init_advance_bearing(self, cmd):
         """지정 방위(bearing_deg)로 distance(m) 앞의 좌표를 1회 계산해
         저장 - 이후엔 navigate_direct와 동일한 실행 로직을 재사용한다."""
@@ -542,10 +570,39 @@ class ActionDispatcher(Node):
 
         return maneuvers.backward(self.boat, hold_heading=hold_heading)
 
+    def _init_dorodori(self, cmd):
+        """도리도리(좌우 스캔) 초기화 - 스윕 기준각을 시작 시점에 한 번만 고정한다.
+
+        기존 _exec_dorodori는 center_heading이 생략되면 매 틱 self.boat.psi를
+        기본값으로 다시 읽었는데, 이는 align_to_cluster와 동일한 결함이다
+        (2026-09-08 architect 리뷰에서 align_to_cluster 수정 검증 중 발견) -
+        스윕 중심이 보트 자신의 회전을 따라가버려 실제로는 절대 좌우로 스윕하지
+        않고 제자리에서 계속 도는 것과 같아진다. 프롬프트 문서(mission_prompt.py)
+        도 "둘 다 생략하면 시작 시점의 현재 헤딩이 기준"이라고 명시하므로,
+        여기서 그 "시작 시점" 캡처를 실제로 수행한다.
+
+        우선순위: 명시적 center_heading(이미 절대값) > center_bearing_to_goal
+        (현재 미션 구간 목표 방향 - 이전엔 아예 처리되지 않던 필드였음) >
+        시작 시점의 현재 헤딩."""
+        center_heading = cmd.get('center_heading')
+        if center_heading is None and cmd.get('center_bearing_to_goal'):
+            if 0 <= self.mission_phase_idx < len(self.mission_waypoints):
+                gx, gy = self.mission_waypoints[self.mission_phase_idx][:2]
+                dx = gx - self.boat.position[0]
+                dy = gy - self.boat.position[1]
+                center_heading = float(np.degrees(np.arctan2(dy, dx)))
+            else:
+                self.get_logger().warn(
+                    'dorodori: center_bearing_to_goal이지만 유효한 미션 목표가 없어 현재 헤딩으로 대체'
+                )
+        if center_heading is None:
+            center_heading = self.boat.psi
+        self.action_params['center_heading'] = center_heading
+
     def _exec_dorodori(self):
-        """좌우 스캔"""
+        """좌우 스캔 - 기준각은 _init_dorodori에서 고정한 값을 그대로 사용"""
         duration = self.action_params.get('duration', SETTINGS.DORODORI_PERIOD_SEC)
-        center = self.action_params.get('center_heading', self.boat.psi)
+        center = self.action_params.get('center_heading')
         half_range = self.action_params.get('half_range', SETTINGS.DORODORI_HALF_RANGE_DEG)
 
         if self.action_elapsed >= duration:
@@ -607,30 +664,41 @@ class ActionDispatcher(Node):
         return psi_error, tau_x
 
     def _init_align_to_cluster(self, cmd):
-        """클러스터 기준 정렬 초기화 - 클러스터 ID로 해당 물체 방향을 찾아 저장"""
+        """클러스터 기준 정렬 초기화 - 클러스터 ID로 해당 물체 방향을 찾아
+        절대 헤딩으로 한 번만 변환해 저장한다.
+
+        advance_bearing(_init_advance_bearing)처럼 상대각→절대좌표/헤딩 변환은
+        시작 시점에 딱 한 번만 해야 한다 - boat.psi가 그 사이에 바뀌기
+        때문이다(정렬 자체가 psi를 바꾸는 동작이므로 매 틱 반드시 바뀐다).
+        예전 코드는 이 변환을 _exec_align_to_cluster에서 매 틱 현재 psi로
+        다시 계산했는데, 그러면 psi_error = (psi_current + target_angle) -
+        psi_current = target_angle로 회전량과 무관하게 항상 고정값이 되어
+        버트가 아무리 돌아도 오차가 줄지 않고(수렴 불가) 타임아웃까지 계속
+        같은 방향 토크를 내어 엉뚱한 최종 헤딩에 멈추는 원인이었다
+        (2026-09-08 실측: psi_error가 정렬 내내 ~18.5°로 고정된 채 3회
+        재시도 후 타임아웃)."""
         cluster_id = cmd.get('cluster_id', 0)
         clusters = maneuvers.detect_lidar_clusters(self.boat)
 
         if cluster_id < len(clusters):
             cluster = clusters[cluster_id]
-            self.action_params['target_angle'] = cluster['center_angle']
+            self.action_params['target_heading'] = (self.boat.psi + cluster['center_angle']) % 360
             self.get_logger().info(
-                f'align_to_cluster: id={cluster_id} → angle={cluster["center_angle"]:.1f}°'
+                f'align_to_cluster: id={cluster_id} → angle={cluster["center_angle"]:.1f}° '
+                f'(절대 헤딩 {self.action_params["target_heading"]:.1f}°로 고정)'
             )
         else:
             self.get_logger().warn(f'align_to_cluster: id={cluster_id} not found')
-            self.action_params['target_angle'] = None
+            self.action_params['target_heading'] = None
 
     def _exec_align_to_cluster(self):
-        """클러스터 기준 정렬 실행 - 저장된 클러스터 각도로 정렬"""
-        target_angle = self.action_params.get('target_angle')
-        if target_angle is None:
+        """클러스터 기준 정렬 실행 - 초기화 시 고정한 절대 헤딩으로 정렬"""
+        target_heading = self.action_params.get('target_heading')
+        if target_heading is None:
             self._record_result('align_to_cluster', 'failed_no_cluster')
             self.current_action = None
             return 0.0, 0.0
 
-        # 클러스터 각도를 절대 헤딩으로 변환
-        target_heading = (self.boat.psi + target_angle) % 360
         tolerance = self.action_params.get('tolerance', 5.0)
         timeout = self.action_params.get('timeout', 10.0)
 
@@ -649,7 +717,7 @@ class ActionDispatcher(Node):
         self.align_settle_count = self.align_settle_count + 1 if settled_now else 0
 
         if self.align_settle_count >= SETTINGS.ALIGN_SETTLE_TICKS:
-            self.get_logger().info(f'align_to_cluster: aligned to cluster angle {target_angle:.1f}°')
+            self.get_logger().info(f'align_to_cluster: aligned to heading {target_heading:.1f}°')
             self._record_result('align_to_cluster', 'aligned')
             self.current_action = None
             self.align_settle_count = 0
@@ -731,6 +799,7 @@ class ActionDispatcher(Node):
                 if 0 <= self.mission_phase_idx < len(self.mission_waypoints) else None
             ),
             'mission_phase_idx': self.mission_phase_idx,
+            'goal_range_m': SETTINGS.GOAL_RANGE,
             'position': {
                 'x': round(self.boat.position[0], 1),
                 'y': round(self.boat.position[1], 1),

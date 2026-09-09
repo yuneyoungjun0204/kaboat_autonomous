@@ -59,7 +59,7 @@ BOAT_WIDTH = 2.5       # WAM-V 폭 (m)
 AVOID_RANGE = 30.0      # 장애물 회피 거리 (m)
 GAIN_PSI = 1.0         # 목적지 각도 가중치
 GAIN_DISTANCE = 10.0    # 거리 가중치
-GOAL_RANGE = 3.0       # 웨이포인트 도착 판정 거리 (m)
+GOAL_RANGE = 5.0       # 웨이포인트 도착 판정 거리 (m) - 대시보드에서 실행 중 조정 가능(set_goal_range 액션)
 
 # PD 제어 파라미터
 # VRX 스러스터는 velocity_control=true (각속도 rad/s 입력)
@@ -119,7 +119,7 @@ STOP_THRUST = 0.0                        # 정지: 0 (모터 출력 없음)
 HOVER_DEADBAND = 0.5             # 호버링 위치 허용 오차 (m)
 DORODORI_HALF_RANGE_DEG = 30.0   # 도리도리 좌우 스윕 범위 (도)
 DORODORI_PERIOD_SEC = 6.0        # 도리도리 왕복 주기 (초) - 빠르게
-ORBIT_DEFAULT_RADIUS = 8.0       # 궤도 반경 (m)
+ORBIT_DEFAULT_RADIUS = 12.0      # 궤도 반경 (m) - 8m는 너무 좁다는 실측 피드백으로 확대 (2026-09-08)
 ORBIT_N_POINTS = 6               # 궤도 웨이포인트 (6개 = 60도 간격)
 
 # 부표 설정
@@ -128,7 +128,14 @@ TARGET_BUOY_COLOR = 'green'      # 선회 대상 부표 (green/red/blue)
 # 센서 설정
 LIDAR_MAX_RANGE = 50.0  # LiDAR 최대 감지 거리 (m)
 LIDAR_ANGLES = 360      # LiDAR 각도 분해능
-MIN_VALID_RANGE = 1.0   # 이 미만은 LiDAR 마운트 자기반사로 간주해 무시 (m)
+MIN_VALID_RANGE = 2.5   # 이 미만은 LiDAR 마운트/선체 자기반사로 간주해 무시 (m)
+# 2026-09-08 실측: 자기반사가 두 밴드로 존재함 - ±76~78°에 0.8m대(기존 1.0m로
+# 이미 필터됨), ±144~148°에 1.5~1.6m대(기존 1.0m로는 안 걸러져 detect_lidar_
+# clusters()의 최근접 클러스터로 잡혀 align_to_cluster/orbit이 실제 부표 대신
+# 자기 선체 후방을 정렬 대상으로 착각하는 원인이었음 - 스폰 지점에서 40m+
+# 이동 후에도 동일 각도/거리로 재현되어 발사대가 아닌 선체 자체의 반사임을
+# 확인). 1.76m까지 관측된 두 번째 밴드에 여유를 두고 2.5m로 상향.
+
 LIDAR_SMOOTHING_ENABLED = True   # LiDAR 지수 평균 스무딩
 LIDAR_SMOOTHING_DECAY = 0.95     # 스무딩 감쇠율 (높을수록 넓게 평균)
 
@@ -137,6 +144,12 @@ CLUSTER_MAX_RANGE = 25.0   # 클러스터 탐색 최대 거리 (m) - 이 밖은 
 CLUSTER_GAP_DEG = 6        # 같은 클러스터로 묶을 최대 각도 간격 (도)
 CLUSTER_MIN_POINTS = 3     # 노이즈 제외 최소 포인트 수
 CLUSTER_MAX_COUNT = 3      # 반환할 최대 클러스터 수 (가까운 순)
+
+# scan_point_to_global 단일 인덱스 결손 허용 폭 (도) - orbit/gate_pass가 참조하는
+# 정확히 그 각도 하나만 라이다 노이즈로 비어있어도 실패 처리하지 않도록, 이 범위
+# 안에서 가장 가까운(최근접 거리) 유효 점으로 대체한다 (2026-09-07: align_to_cluster로 정확히
+# 정렬됐는데도 orbit이 failed_no_lidar로 실패하는 현상 실측 후 추가)
+SCAN_LOOKUP_WINDOW_DEG = 3
 
 # 클러스터 히스테리시스 (ClusterTracker - RViz 평가용, 아직 LLM 파이프라인 미연결)
 CLUSTER_MATCH_ANGLE_TOL = 12.0  # 프레임간 같은 클러스터로 볼 각도 오차 허용치 (도)

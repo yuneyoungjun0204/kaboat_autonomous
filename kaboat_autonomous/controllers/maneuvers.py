@@ -57,12 +57,41 @@ def lidar_point_to_global(boat: Boat, angle_deg: float, distance: float) -> Tupl
     return (float(x), float(y))
 
 
-def scan_point_to_global(boat: Boat, idx: int) -> Optional[Tuple[float, float]]:
-    """boat.scan[idx]가 유효(>0)하면 전역 좌표를, 아니면 None을 반환."""
-    dist = boat.scan[idx % 360]
-    if dist <= 0:
+def scan_point_to_global(boat: Boat, idx: int, search_window_deg: int = None) -> Optional[Tuple[float, float]]:
+    """boat.scan[idx]가 유효(>0)하면 전역 좌표를 반환한다.
+
+    그 정확히 한 인덱스만 라이다 노이즈로 결손(0 이하)이어도 바로 포기하지 않고,
+    주변 ±search_window_deg(기본 SETTINGS.SCAN_LOOKUP_WINDOW_DEG) 안의 유효 각도로
+    대신 찾는다 - detect_lidar_clusters()는 여러 점의 평균을 쓰는 반면
+    orbit/gate_pass는 이 함수 하나로 단일 인덱스만 보므로, 클러스터 전체는
+    멀쩡한데 그 한 점만 결손이어도 failed_no_lidar로 실패하던 문제를 완화한다
+    (2026-09-07 align_to_cluster 직후 orbit 실패 실측).
+
+    윈도우 안에 유효한 후보가 여럿이면 각도가 가장 가까운 게 아니라 거리가
+    가장 가까운(최근접) 후보를 고른다 - 목표물(부표 등)은 대개 가장 가까운
+    반사이고, 각도만 우선하면 결손 바로 옆의 더 먼 배경(벽 등)을 목표로
+    잘못 잡을 수 있다 (재현: 부표 10m 결손 옆에 45m 벽이 있으면 각도 우선은
+    벽을, 거리 우선은 부표를 정확히 반환).
+
+    윈도우 안에도 유효 각도가 전혀 없으면 기존과 동일하게 None."""
+    if search_window_deg is None:
+        search_window_deg = SETTINGS.SCAN_LOOKUP_WINDOW_DEG
+    n = len(boat.scan)
+    idx = idx % n
+    dist = boat.scan[idx]
+    if dist > 0:
+        return lidar_point_to_global(boat, float(idx), dist)
+    candidates = []
+    for offset in range(1, search_window_deg + 1):
+        for cand in (idx - offset, idx + offset):
+            cand %= n
+            cand_dist = boat.scan[cand]
+            if cand_dist > 0:
+                candidates.append((cand_dist, cand))
+    if not candidates:
         return None
-    return lidar_point_to_global(boat, float(idx % 360), dist)
+    best_dist, best_idx = min(candidates)
+    return lidar_point_to_global(boat, float(best_idx), best_dist)
 
 
 # ============================================================
