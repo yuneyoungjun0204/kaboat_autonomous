@@ -81,13 +81,14 @@ class ActionDispatcher(Node):
         self.align_settle_count = 0  # align이 tolerance 이내에 연속으로 머문 틱 수
         self.yaw_rate_deg = 0.0      # IMU 기반 실제 요(yaw) 각속도 (도/초)
 
-        # === 미션 단계 자동 전환 (mission_phase_done) ===
-        # SETTINGS.get_mission_waypoints_local()의 순서를 그대로 따라간다.
-        # requires_llm=True인 지점에 도착하면 멈춰 LLM(대시보드) 판단을 기다리고,
-        # False면 즉시 다음 지점으로 navigate_avoid를 연쇄 발행한다.
+        # 웨이포인트 자동전환 상태기계(mission_phase_done 등으로 깨우던 것)는
+        # HYBRID_ARCHITECTURE_REFACTORING.md §3.1에서 제거됨 - 대시보드 실행
+        # 경로에서 시작되지 않아 죽은 코드였음. mission_waypoints/mission_phase_idx는
+        # action_status 표시와 dorodori의 center_bearing_to_goal에서 여전히 쓰여서
+        # 남겨둠 (단, mission_phase_idx는 이제 0에서 전진하지 않는다 - 이 둘을
+        # 참고하는 곳에서 "항상 첫 웨이포인트"라는 걸 알고 써야 함).
         self.mission_waypoints = SETTINGS.get_mission_waypoints_local()
         self.mission_phase_idx = 0
-        self.auto_transit = False   # 현재 navigate_avoid가 미션 자동 전환에 의한 것인지 여부
 
         # === 압축 상태(blackboard) ===
         # LLM 대화를 매 판단마다 짧게 끊어도(bounded-context) "방금 뭘 했는지,
@@ -204,9 +205,6 @@ class ActionDispatcher(Node):
             self.action_start_time = time.time()
             self.action_elapsed = 0.0
             self.action_params = cmd
-            # 새 액션이 시작되면 기본적으로 자동 전환 체인은 끊는다 - 아래
-            # mission_phase_done 분기에서만 다시 True로 설정한다.
-            self.auto_transit = False
             self.waypoint_hold_until = None
 
             # 액션별 초기화
@@ -229,25 +227,20 @@ class ActionDispatcher(Node):
             elif action == 'reject_cluster':
                 self._reject_cluster(cmd)
                 self.current_action = None
-            elif action == 'mission_phase_done':
-                self._advance_mission_phase(goto=cmd.get('goto'))
+            elif action in ('mission_phase_done', 'mission_auto_pause', 'mission_auto_resume'):
+                # 셋 다 안전한 no-op - 핸들러를 아예 지우면(elif에 안 걸리면) 위
+                # 제네릭 초기화가 이미 current_action=action으로 고정해둔 채라
+                # 매 틱 0-추력만 내고 decision_needed도 계속 False로 멈춘다
+                # (보트가 응답불능으로 얼어붙음 - mission_auto_pause에서 실측된
+                # 버그). 그래서 명시적으로 받아 즉시 current_action=None으로
+                # 되돌리기만 하고, 상태기계(§3.1에서 제거됨)는 다시 안 건드린다.
+                self.get_logger().info(f'{action}: 상태기계 없음 - no-op 처리')
+                self.current_action = None
+                self._record_result(action, 'noop_state_machine_removed')
             elif action == 'advance_bearing':
                 self._init_advance_bearing(cmd)
             elif action == 'dorodori':
                 self._init_dorodori(cmd)
-            elif action == 'mission_auto_pause':
-                # CORE_PROMPT가 모든 미션에 문서화하는 액션인데 핸들러가 없으면
-                # current_action이 이 문자열로 영원히 고정돼 매 틱 0-추력만
-                # 발행하고 decision_needed도 계속 False로 멈춘다(보트가 사실상
-                # 응답불능 상태로 얼어붙음) - 위 제네릭 초기화가 이미
-                # current_action=action, auto_transit=False로 세팅했으니,
-                # 여기서는 그걸 즉시 None으로 되돌려 정지+decision_needed=True로
-                # 만드는 것만으로 "일시정지" 의미를 충족한다.
-                self.get_logger().info('mission_phase: auto-transit paused by LLM')
-                self.current_action = None
-                self._record_result('mission_auto_pause', 'paused')
-            elif action == 'mission_auto_resume':
-                self._resume_mission_phase()
             elif action == 'set_goal_range':
                 self._set_goal_range(cmd)
                 self.current_action = None
@@ -341,76 +334,6 @@ class ActionDispatcher(Node):
             self.current_waypoint_idx = 0
             self.waypoint_hold_until = None
             self.get_logger().info(f'Waypoints: {len(wps)} loaded')
-
-    def _advance_mission_phase(self, goto=None):
-        """미션 단계를 한 칸 전진시키고 '그 지점까지는' 항상 navigate_avoid로
-        자동 이동한다 (requires_llm은 이동 여부가 아니라 "도착한 뒤" 멈춰서
-        LLM 판단을 기다릴지를 결정한다 - 예: gate_start는 requires_llm=True지만
-        start->gate_start 이동 자체는 자동이고, 도착해서야 게이트 인식을
-        시작해야 하므로 거기서 멈춘다). 실제로 requires_llm을 검사해 멈출지
-        더 진행할지는 _exec_navigate_avoid의 도착 처리에서 한다.
-
-        goto: 웨이포인트 이름을 지정하면 순차 진행 대신 그 지점으로 바로
-        점프한다 (미션별 검증 모드가 처음부터 순서대로 다시 밟지 않고
-        해당 미션 시작점으로 바로 이동할 때 사용).
-        """
-        if goto is not None:
-            match_idx = next(
-                (i for i, wp in enumerate(self.mission_waypoints) if wp[3] == goto), None
-            )
-            if match_idx is None:
-                # 오타 등으로 못 찾은 경우 - 예전 인덱스에서 그냥 +1 진행해버리면
-                # 엉뚱한 지점으로 조용히 이동해버릴 수 있으니, 여기서 확실히
-                # 멈추고 호출자가 알 수 있게 한다.
-                self.get_logger().warn(f'mission_phase: unknown goto target "{goto}" - 이동 취소')
-                self.current_action = None
-                self.auto_transit = False
-                self._record_result('mission_phase_done', f'failed_unknown_goto:{goto}')
-                return
-            self.mission_phase_idx = match_idx - 1
-
-        self.mission_phase_idx += 1
-
-        if self.mission_phase_idx >= len(self.mission_waypoints):
-            self.get_logger().info('mission_phase: sequence complete')
-            self._record_result('mission_phase_done', 'sequence_complete')
-            self.current_action = None
-            self.auto_transit = False
-            return
-
-        x, y, _heading, name, desc, requires_llm = self.mission_waypoints[self.mission_phase_idx]
-        self.get_logger().info(
-            f'mission_phase: -> {name} 이동 시작 (도착 시 {"LLM 대기" if requires_llm else "자동 연쇄"}) - {desc}'
-        )
-
-        self.current_action = 'navigate_avoid'
-        self.action_start_time = time.time()
-        self.action_elapsed = 0.0
-        self.action_params = {'goal_x': x, 'goal_y': y}
-        self.auto_transit = True
-        self._record_result('mission_phase_done', f'transit_to:{name}')
-
-    def _resume_mission_phase(self):
-        """mission_auto_pause로 멈춘 자동 전환을 재개한다. _advance_mission_phase와
-        달리 인덱스를 전진시키지 않고 '현재 mission_phase_idx가 가리키는 지점'으로
-        다시 navigate_avoid를 발행한다 - LLM이 일시정지 중 수동 액션(align 등)으로
-        위치를 바꿔놨을 수 있으므로 그 지점으로 다시 이동시키는 게 맞다."""
-        if not (0 <= self.mission_phase_idx < len(self.mission_waypoints)):
-            self.get_logger().warn('mission_auto_resume: 유효한 미션 단계가 없음')
-            self.current_action = None
-            self.auto_transit = False
-            self._record_result('mission_auto_resume', 'failed_no_phase')
-            return
-
-        x, y, _heading, name, desc, requires_llm = self.mission_waypoints[self.mission_phase_idx]
-        self.get_logger().info(f'mission_phase: auto-transit resumed -> {name}')
-
-        self.current_action = 'navigate_avoid'
-        self.action_start_time = time.time()
-        self.action_elapsed = 0.0
-        self.action_params = {'goal_x': x, 'goal_y': y}
-        self.auto_transit = True
-        self._record_result('mission_auto_resume', f'resumed:{name}')
 
     def _set_goal_range(self, cmd):
         """웨이포인트 도착 판정 거리(m)를 실행 중에 바꾼다 - 대시보드의
@@ -516,21 +439,7 @@ class ActionDispatcher(Node):
                     'x': self.boat.position[0], 'y': self.boat.position[1]
                 })
             self._record_result('navigate_avoid', 'goal_reached')
-            if self.auto_transit:
-                # 미션 단계 자동 전환 중 도착 - 방금 도착한 지점이
-                # requires_llm=True면 여기서 멈춰 LLM 판단을 기다리고,
-                # False면 계속 다음 지점으로 연쇄 진행한다
-                # (예: buoy_orbit -> hopping -> obstacle_end_dock_start).
-                _, _, _, phase_name, _, phase_requires_llm = self.mission_waypoints[self.mission_phase_idx]
-                if phase_requires_llm:
-                    self.get_logger().info(f'mission_phase: arrived at {phase_name}, awaiting LLM')
-                    self.current_action = None
-                    self.auto_transit = False
-                    self._record_result('mission_phase_done', f'awaiting_llm:{phase_name}')
-                else:
-                    self._advance_mission_phase()
-            else:
-                self.current_action = None
+            self.current_action = None
             return 0.0, 0.0
 
         return maneuvers.navigate_avoid(self.boat, goal_x, goal_y)
