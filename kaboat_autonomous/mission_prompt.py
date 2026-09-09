@@ -340,14 +340,16 @@ VISION_GUIDE = f"""## 색상-부표 규약 (본 코스 실측 기준, IALA와 �
 """
 
 
-def _get_dock_start_heading():
-    """obstacle_end_dock_start 웨이포인트에 사전 측량된 헤딩(ENU, 0=동/90=북)을
-    반환. 도킹 스테이션 좌표 자체는 모르지만, 이 시작 지점에서 도킹 스테이션을
-    바라보는 방향은 코스 설계 시 미리 측량되어 있으므로 align/dorodori의 기준
-    각도로 재사용한다. 웨이포인트를 못 찾으면 None."""
+def get_waypoint_heading(name):
+    """이름으로 미션 웨이포인트에 사전 측량된 헤딩(ENU, 0=동/90=북)을 반환한다.
+    docking뿐 아니라 gate/buoy_orbit 사전 정렬(HYBRID_ARCHITECTURE_REFACTORING.md
+    §3.3/3.5)도 이 함수를 공유해서 쓴다 - 원래는 obstacle_end_dock_start 전용
+    _get_dock_start_heading()이었는데, get_mission_waypoints_local()의 heading
+    필드 자체가 처음부터 범용이라 이름만 일반화했다. 웨이포인트를 못 찾거나
+    heading_deg가 측량 안 돼 있으면 None."""
     try:
-        for _x, _y, heading, name, _desc, _requires_llm in SETTINGS.get_mission_waypoints_local():
-            if name == 'obstacle_end_dock_start':
+        for _x, _y, heading, wp_name, _desc, _requires_llm in SETTINGS.get_mission_waypoints_local():
+            if wp_name == name:
                 return heading
     except Exception:
         pass
@@ -378,10 +380,18 @@ def generate_mission_context(mission_type: str, params: dict = None) -> str:
 
 목표: 적색-녹색 게이트를 찾아 사이로 통과하세요.
 
+**게이트는 한 세트가 아닐 수 있다.** 적색-녹색 부표 게이트가 여러 쌍 연속으로
+배치돼 있을 수 있고, `gate_pass`로 하나를 통과했다고 미션이 끝난 게 아니다 -
+통과할 때마다 다음 게이트가 남아있는지 다시 탐색할 것. 기본 전제는 게이트들이
+대략 `gate_start`→`gate_end`(={gate_end_hint}) 방향으로 이어져 있다는 것 -
+다음 게이트를 찾을 때 그 방향을 우선 탐색하라. 정지해서 두리번거리기보다
+`gate_pass`를 빠르고 안정적으로 반복 실행하는 쪽을 우선한다.
+
 **완료 조건 (중요): `gate_pass`로 중간점을 지나간 것만으로는 미션이 끝난 게
-아니다.** 카메라+LiDAR 융합 분석으로 두 부표를 실제로 "인식"해서 사이를
-통과한 뒤, ({gate_end_hint}) 지점까지 실제로 도달해 게이트 구조물 영역을
-완전히 벗어나야 완료다. gate_pass만 하고 도구 호출을 멈추지 말 것.
+아니다.** 카메라+LiDAR 융합 분석으로 부표들을 실제로 "인식"해서 사이를 통과한
+뒤, 더 이상 게이트가 안 보이고 ({gate_end_hint}) 지점까지 실제로 도달해 게이트
+구조물 영역을 완전히 벗어나야 완료다 - 마지막 게이트를 통과한 뒤에도 계속 다음
+게이트가 있는지 확인할 것. gate_pass만 하고 도구 호출을 멈추지 말 것.
 
 **이 미션에서는 `navigate_avoid`를 쓰지 말 것** - LiDAR 회피 경로 계획은 부표를
 장애물로 여겨 피해가려 하므로, 게이트 중앙을 그대로 통과해야 하는 이 미션과
@@ -389,16 +399,17 @@ def generate_mission_context(mission_type: str, params: dict = None) -> str:
 `hover`/`backward`/`navigate_direct`는 게이트를 찾고 정렬·보정하기 위해
 상황에 맞게 섞어 쓰는 보조 액션이다.
 
-단계 (아래를 순서대로, 필요하면 반복하며 조합):
+단계 (아래를 게이트마다 반복하며 조합):
 1. 게이트가 안 보이면: `clusters` 확인 → 있으면 가장 가까운 클러스터로 `align`
-   (없으면 `dorodori`)로 탐색
+   (없으면 `dorodori`, `gate_start`→`gate_end` 방향을 우선 탐색)로 탐색
 2. 이미지에서 적색/녹색 부표 위치 확인 → 화면 좌표를 LiDAR 인덱스로 변환
 3. 두 부표의 중간점이 계산되면 `gate_pass`로 게이트 진입 (이 미션의 핵심 액션)
 4. `gate_pass` 도중 정렬이 틀어지면 `align`로 재정렬 후 재시도, 대기가
    필요하면 `hover`, stuck이면 `backward`로 벗어난 뒤 1번부터 재탐색
 5. `gate_pass` 완료 후 카메라/LiDAR로 좌우 부표가 더 이상 정면이 아니라 옆이나
-   뒤로 지나갔음을 확인한 다음, `navigate_direct`로 ({gate_end_hint})까지
-   똑바로 빠져나온다 - 이 지점 도착이 확인되어야 미션 완료로 간주한다
+   뒤로 지나갔음을 확인 → 다음 게이트가 있으면 1번부터 반복, 없으면
+   `navigate_direct`로 ({gate_end_hint})까지 똑바로 빠져나온다 - 이 지점 도착이
+   확인되어야 미션 완료로 간주한다
 
 힌트:
 - 녹색은 왼쪽(좌현), 적색은 오른쪽(우현)에 있어야 정상 진입 (이 코스는 IALA 반대 배치)
@@ -458,10 +469,12 @@ def generate_mission_context(mission_type: str, params: dict = None) -> str:
 
 목표: {color} 마커가 있는 도킹 스테이션에 진입하여 3초 정박하세요.
 
+시작하자마자 대시보드가 이미 `align` (heading: {dock_heading})으로 도킹 스테이션
+방향에 정렬해뒀다 (obstacle_end_dock_start 웨이포인트에 사전 측량된 방향 - 도킹
+스테이션 좌표는 몰라도 이 지점에서 바라봐야 할 방향은 이미 알고 있음). 그러니
+아래 1단계부터 시작할 것.
+
 단계:
-0. 시작하자마자 `align` (heading: {dock_heading})으로 도킹 스테이션 방향에 먼저 정렬할 것
-   (obstacle_end_dock_start 웨이포인트에 사전 측량된 방향 - 도킹 스테이션 좌표는 몰라도
-   이 지점에서 바라봐야 할 방향은 이미 알고 있음)
 1. `clusters` 확인 → 있으면 가장 가까운 클러스터로 `align` (없으면 `dorodori`, center_heading: {dock_heading})로
    도킹 스테이션 탐색 - 클러스터 방향이 아니라 이 사전 측량 방향을 기준으로 탐색할 것
 2. {color} 마커/도형 식별
@@ -482,7 +495,7 @@ def generate_mission_context(mission_type: str, params: dict = None) -> str:
     template = contexts.get(mission_type, "")
     fmt_params = dict(params) if params else {}
     if mission_type == 'docking':
-        heading = _get_dock_start_heading()
+        heading = get_waypoint_heading('obstacle_end_dock_start')
         fmt_params.setdefault(
             'dock_heading',
             f"{heading:.1f}" if heading is not None else "현재 헤딩 유지 (웨이포인트 헤딩 없음)"
