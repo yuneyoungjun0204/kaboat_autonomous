@@ -81,6 +81,15 @@ CORE_PROMPT_BODY = """# KABOAT 자율주행 미션 수행 시스템
 {"action": "navigate_direct", "goal_x": 10.0, "goal_y": 20.0, "hold_heading": 45.0}
 ```
 
+**주의: 위 `goal_x`/`goal_y`/`hold_heading` 숫자는 형식을 보여주기 위한 예시일 뿐,
+절대 그대로 복사해서 쓰지 말 것.** goal_x/goal_y는 "센서/상태" 블록의
+"현재 위치(로컬)"과 동일한 좌표계다 - 반드시 그 현재 위치와 이번에 가려는
+실제 목표(게이트/웨이포인트 힌트 등)를 기준으로 직접 계산한 값을 쓸 것.
+hold_heading을 쓸 거면 goal_x/goal_y로부터 계산한 방위각과 일치해야 한다
+(2026-09-10 실측: 미션 시작 직후 현재 위치와 무관하게 예시값과 거의 같은
+`goal_x=10, goal_y=0, hold_heading=0`을 그대로 호출해 엉뚱한 방향으로
+이동을 시도한 사례 있음).
+
 ### 기동 모듈
 ```json
 // 후진 (stuck 탈출, 헤딩 유지)
@@ -305,6 +314,18 @@ VISION_GUIDE = f"""## 색상-부표 규약 (본 코스 실측 기준, IALA와 �
 - 화면 X 좌표를 LiDAR 각도로 변환 (실제 카메라 해상도 1280x720 기준,
   중앙=640px): `lidar_angle = (640 - image_x) / 640 * {SETTINGS.CAMERA_HALF_FOV_DEG:.0f}`
   - 예: x=320 (왼쪽 1/4) → +{SETTINGS.CAMERA_HALF_FOV_DEG/2:.0f}° / x=960 (오른쪽 1/4) → -{SETTINGS.CAMERA_HALF_FOV_DEG/2:.0f}°
+- **주의: 이 픽셀→각도 변환은 근사치일 뿐이다 (카메라-LiDAR 위치 오프셋/렌즈
+  왜곡 미보정).** `gate_pass`의 `left_idx`/`right_idx`로 그 값을 그대로 쓰지
+  말고, `/lidar_summary`의 `clusters[].center_angle` 중 계산한 각도와 가장
+  가까운 것이 있으면 (수 도 이내) 그 center_angle을 반올림한 정수를 대신
+  사용할 것 - `clusters`는 실제 LiDAR 반사가 확인된 각도라 픽셀 계산보다
+  정확하다. 가까운 클러스터가 전혀 없으면 계산값을 그대로 쓰되, `gate_pass`
+  결과가 `failed_no_lidar`로 나오면 그 방향엔 실제 반사체가 없었다는 뜻이니
+  같은 각도로 재시도하지 말고 카메라를 다시 확인하거나 `dorodori`로 재탐색할 것
+  (2026-09-10 실측: left_idx=28/right_idx=342로 호출 시 해당 각도의 실제
+  거리가 LIDAR_MAX_RANGE(50m)를 넘는 배경이라 0으로 필터링되어 매번
+  failed_no_lidar로 실패, 보트가 전혀 움직이지 않음 - 근처에 진짜 클러스터가
+  없다면 애초에 그 인덱스로 gate_pass를 시도하지 말 것).
 
 ## 카메라-LiDAR 융합 추론 (핵심!)
 

@@ -148,8 +148,14 @@ CLUSTER_MAX_COUNT = 3      # 반환할 최대 클러스터 수 (가까운 순)
 # scan_point_to_global 단일 인덱스 결손 허용 폭 (도) - orbit/gate_pass가 참조하는
 # 정확히 그 각도 하나만 라이다 노이즈로 비어있어도 실패 처리하지 않도록, 이 범위
 # 안에서 가장 가까운(최근접 거리) 유효 점으로 대체한다 (2026-09-07: align_to_cluster로 정확히
-# 정렬됐는데도 orbit이 failed_no_lidar로 실패하는 현상 실측 후 추가)
-SCAN_LOOKUP_WINDOW_DEG = 3
+# 정렬됐는데도 orbit이 failed_no_lidar로 실패하는 현상 실측 후 추가).
+# 2026-09-10: gate_pass의 left_idx/right_idx는 LLM이 카메라 픽셀 좌표를 각도로
+# 변환해 만드는데(mission_prompt.py 픽셀→각도 공식, 카메라-LiDAR 오프셋/렌즈
+# 왜곡 미보정) 실측 오차가 ±3°를 넘어 정확히 그 인덱스에 부표가 안 잡히고
+# failed_no_lidar로 실패, 보트가 안 움직이는 문제가 재현됨 - 3 -> 5로 확대해
+# 약간의 조준 오차를 흡수. 근본 수정은 mission_prompt.py에서 LLM이 픽셀 계산값
+# 대신 실제 clusters[].center_angle을 우선 쓰도록 안내한 것 (이 값은 안전망).
+SCAN_LOOKUP_WINDOW_DEG = 5
 
 # 클러스터 히스테리시스 (ClusterTracker - RViz 평가용, 아직 LLM 파이프라인 미연결)
 CLUSTER_MATCH_ANGLE_TOL = 12.0  # 프레임간 같은 클러스터로 볼 각도 오차 허용치 (도)
